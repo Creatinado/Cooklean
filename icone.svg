@@ -1,0 +1,46 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
+  <defs>
+    <!-- mordida: tira três círculos do canto superior direito do biscoito -->
+    <mask id="mordida">
+      <rect width="128" height="128" fill="#fff"/>
+      <circle cx="104" cy="24" r="17" fill="#000"/>
+      <circle cx="84" cy="14" r="10" fill="#000"/>
+      <circle cx="114" cy="44" r="10" fill="#000"/>
+    </mask>
+    <radialGradient id="massa" cx="0.4" cy="0.35" r="0.75">
+      <stop offset="0" stop-color="#f3c47a"/>
+      <stop offset="1" stop-color="#d48f3f"/>
+    </radialGradient>
+    <linearGradient id="selo" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#f05454"/>
+      <stop offset="1" stop-color="#c62828"/>
+    </linearGradient>
+  </defs>
+
+  <!-- sombra no chão -->
+  <ellipse cx="60" cy="117" rx="42" ry="6" fill="#000" opacity="0.18"/>
+
+  <g mask="url(#mordida)">
+    <!-- borda mais escura (dá volume) -->
+    <circle cx="60" cy="62" r="50" fill="#b9732c"/>
+    <!-- massa -->
+    <circle cx="60" cy="59" r="47" fill="url(#massa)"/>
+    <!-- gotas de chocolate -->
+    <g fill="#5a3216">
+      <path d="M33 40c4-4 11-3 12 3 1 5-4 9-9 8s-6-8-3-11z"/>
+      <path d="M62 33c3-3 9-2 10 2 1 5-3 8-7 7s-6-6-3-9z"/>
+      <path d="M44 66c4-3 10-1 10 4 0 5-5 8-9 6s-4-7-1-10z"/>
+      <path d="M72 58c4-4 11-2 11 3 1 6-5 9-9 7s-5-7-2-10z"/>
+      <path d="M30 82c3-3 8-2 9 2 1 4-3 7-6 6s-5-5-3-8z"/>
+      <path d="M58 88c3-3 9-2 10 3 0 4-4 7-8 6s-5-6-2-9z"/>
+      <path d="M88 80c3-2 7-1 7 2 1 4-3 6-6 5s-3-5-1-7z"/>
+    </g>
+    <!-- brilho -->
+    <ellipse cx="44" cy="30" rx="16" ry="7" fill="#fff" opacity="0.22" transform="rotate(-25 44 30)"/>
+  </g>
+
+  <!-- selo de "eliminar" -->
+  <circle cx="98" cy="98" r="24" fill="#fff"/>
+  <circle cx="98" cy="98" r="20" fill="url(#selo)"/>
+  <path d="M89 89l18 18M107 89l-18 18" stroke="#fff" stroke-width="6" stroke-linecap="round"/>
+</svg>
