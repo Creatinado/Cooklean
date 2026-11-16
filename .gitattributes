@@ -1,0 +1,4 @@
+# arquivos lidos por ferramentas do Windows: sempre com fim de linha CRLF
+*.bat text eol=crlf
+*.iss text eol=crlf
+*.ico binary
