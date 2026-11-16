@@ -1,0 +1,79 @@
+# Gera a versão para Windows (LimpaCookies.exe e o instalador) e anexa à Release.
+#
+# Roda sozinho sempre que uma Release é publicada. Também dá para disparar à mão, em
+# Actions > Windows > Run workflow, dizendo a qual Release anexar os arquivos.
+name: Windows
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release onde anexar os arquivos (ex.: v1.3.0)"
+        required: true
+
+permissions:
+  contents: write          # para anexar arquivos à Release
+
+jobs:
+  exe:
+    runs-on: windows-latest
+    env:
+      TAG: ${{ github.event.release.tag_name || inputs.tag }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # numa Release, o código dela; à mão, o ramo escolhido
+          ref: ${{ github.event.release.tag_name || github.ref }}
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Testar no Windows
+        shell: pwsh
+        run: |
+          python limpa_cookies.py --resumo
+          if ($LASTEXITCODE) { throw "--resumo falhou" }
+
+          # "Iniciar com o sistema" grava e tira o valor do registro de verdade?
+          $run = "HKCU\Software\Microsoft\Windows\CurrentVersion\Run"
+          python -c "import limpa_cookies as m; assert m.save_settings({'iniciar_com_sistema': True, 'iniciar_minimizado': True}) == []"
+          reg query $run /v LimpaCookiesJanela
+          if ($LASTEXITCODE) { throw "o início com o sistema não foi gravado no registro" }
+          python -c "import limpa_cookies as m; assert m.save_settings({'iniciar_com_sistema': False, 'iniciar_minimizado': False}) == []"
+          reg query $run /v LimpaCookiesJanela 2>$null
+          if (-not $LASTEXITCODE) { throw "o início com o sistema não saiu do registro" }
+          $global:LASTEXITCODE = 0
+
+      - name: Instalar o Inno Setup 6
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) {
+            choco install innosetup --version=6.2.2 --no-progress -y
+          }
+
+      - name: Gerar o .exe e o instalador
+        shell: cmd
+        run: call windows\gerar_exe.bat
+
+      - name: Conferir que a janela abre
+        shell: pwsh
+        run: |
+          Start-Process dist\LimpaCookies.exe
+          Start-Sleep -Seconds 15
+          $janela = Get-Process LimpaCookies -ErrorAction SilentlyContinue |
+              Where-Object MainWindowTitle -eq "Limpa Cookies"
+          Get-Process LimpaCookies -ErrorAction SilentlyContinue | Stop-Process -Force
+          if (-not $janela) { throw "a janela do Limpa Cookies não abriu" }
+
+      - name: Anexar à Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $arquivos = Get-ChildItem dist\*.exe
+          $arquivos | Format-Table Name, Length
+          if ($arquivos.Count -lt 2) { throw "faltou o instalador (Inno Setup)" }
+          gh release upload $env:TAG $arquivos.FullName --clobber

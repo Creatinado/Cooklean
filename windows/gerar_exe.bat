@@ -64,9 +64,10 @@ echo.
 echo Algo falhou; veja as mensagens acima.
 
 :falhou
-pause
+if not defined CI pause
 exit /b 1
 
 :fim
-pause
+rem No GitHub (variavel CI) ninguem aperta uma tecla: nao espera.
+if not defined CI pause
 exit /b 0
