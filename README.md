@@ -48,7 +48,7 @@ sudo apt install ./limpa-cookies_*_all.deb
 Depois é só procurar **Limpa Cookies** no menu de aplicativos, ou rodar `limpa-cookies`.
 Para remover: `sudo apt remove limpa-cookies`.
 
-Outras formas, a partir do código (`git clone https://github.com/SeveXtz/Cooklean.git`):
+Outras formas, a partir do código (`git clone https://github.com/Creatinado/Cooklean.git`):
 
 - **Gerar o pacote você mesmo:** `./gerar_deb.sh` cria o `.deb` na pasta `dist`.
 - **Sem senha de administrador:** `./instalar.sh` cria o atalho no menu só para o seu
