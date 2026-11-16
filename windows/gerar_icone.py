@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Gera windows/icone.ico a partir de icone.svg. Rodar no Linux (usa o GdkPixbuf):
+"""Gera windows/icone.ico e windows/icone.png a partir de icone.svg. Rodar no Linux (usa o GdkPixbuf):
 
     python3 windows/gerar_icone.py
 
@@ -48,3 +48,8 @@ destino = os.path.join(AQUI, "icone.ico")
 with open(destino, "wb") as fh:
     fh.write(ico)
 print(f"{destino}: {len(images)} tamanhos, {len(ico)} bytes")
+
+# imagem da página inicial da janela Tk
+png = os.path.join(AQUI, "icone.png")
+GdkPixbuf.Pixbuf.new_from_file_at_size(SVG, 112, 112).savev(png, "png", [], [])
+print(png)
