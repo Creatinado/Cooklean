@@ -12,9 +12,12 @@ Uso:
     limpa_cookies.py --resumo     imprime só a contagem por aplicativo (sem sites)
     limpa_cookies.py --home DIR   usa DIR no lugar da pasta pessoal (para testes)
     limpa_cookies.py --tk         no Linux, abre a janela Tk (a mesma do Windows)
+    limpa_cookies.py --minimizado abre a janela minimizada (usado ao iniciar com o sistema)
 
 A janela também programa limpezas automáticas (ao iniciar a sessão, num horário, ao
 desligar), de todos os sites ou só de alguns; ver "limpeza automática" mais abaixo.
+Guarda quantos cookies foram eliminados (ver "estatísticas") e pode abrir sozinha
+quando o sistema inicia (ver "configurações").
 """
 from __future__ import annotations
 
@@ -31,10 +34,11 @@ import threading
 import time
 from collections import Counter, defaultdict
 from dataclasses import dataclass
+from datetime import date, timedelta
 
 APP_ID = "local.LimpaCookies"
 APP_NAME = "Limpa Cookies"
-APP_VERSION = "1.2.0"
+APP_VERSION = "1.3.0"
 WINDOWS = sys.platform == "win32"
 
 KIND_SESSION = "Sessão"
@@ -770,6 +774,7 @@ def run_rules(trigger: str, home: str | None = None) -> int:
     _write_text(os.path.join(config_dir(home), "execucoes.json"),
                 json.dumps({k: v for k, v in runs.items() if k in known},
                            ensure_ascii=False, indent=2) + "\n")
+    record_cleanup(sum(deleted.values()), home)
     return sum(deleted.values())
 
 
@@ -879,22 +884,27 @@ def _sync_linux(whens: set[str], times: list[str]) -> list[str]:
     return problems
 
 
-def _sync_windows(whens: set[str], times: list[str]) -> list[str]:
+def _windows_run_value(name: str, command: str | None) -> None:
+    """Põe (ou, com None, tira) um programa do início de sessão: valor Run do registro
+    do usuário, que não pede administrador."""
     import winreg
+    with winreg.CreateKey(winreg.HKEY_CURRENT_USER,
+                          r"Software\Microsoft\Windows\CurrentVersion\Run") as key:
+        if command:
+            winreg.SetValueEx(key, name, 0, winreg.REG_SZ, command)
+        else:
+            try:
+                winreg.DeleteValue(key, name)
+            except FileNotFoundError:
+                pass
+
+
+def _sync_windows(whens: set[str], times: list[str]) -> list[str]:
     command = subprocess.list2cmdline(_self_command())
     hidden = {"creationflags": 0x08000000}        # CREATE_NO_WINDOW
     problems: list[str] = []
-    # início de sessão: valor Run do registro do usuário (não pede administrador)
-    with winreg.CreateKey(winreg.HKEY_CURRENT_USER,
-                          r"Software\Microsoft\Windows\CurrentVersion\Run") as key:
-        if whens & {WHEN_LOGIN, WHEN_SHUTDOWN}:
-            winreg.SetValueEx(key, "LimpaCookies", 0, winreg.REG_SZ,
-                              f"{command} --automatico {WHEN_LOGIN}")
-        else:
-            try:
-                winreg.DeleteValue(key, "LimpaCookies")
-            except FileNotFoundError:
-                pass
+    _windows_run_value("LimpaCookies", f"{command} --automatico {WHEN_LOGIN}"
+                       if whens & {WHEN_LOGIN, WHEN_SHUTDOWN} else None)
     # horários: uma tarefa diária por horário no Agendador de Tarefas
     state = os.path.join(config_dir(None), "agendado.json")
     old = _read_json(state, [])
@@ -928,6 +938,162 @@ def sync_schedules(rules: list[dict], home: str | None = None) -> list[str]:
         return _sync_windows(whens, times) if WINDOWS else _sync_linux(whens, times)
     except (OSError, subprocess.SubprocessError) as exc:
         return [f"As regras foram gravadas, mas não consegui agendar: {exc}"]
+
+
+# --------------------------------------------------------------------------- estatísticas
+#
+# Cada eliminação (pela janela ou automática) fica em estatisticas.json: quando, quantos
+# cookies e em que sessão. Uma sessão é uma execução do programa: a janela aberta, ou uma
+# limpeza automática disparada pelo sistema.
+
+SESSION_ID = f"{int(time.time())}-{os.getpid()}"
+STATS_KEEP_DAYS = 60
+WEEKDAYS = ["seg", "ter", "qua", "qui", "sex", "sáb", "dom"]
+
+
+def _cleanups(home: str | None) -> list[dict]:
+    data = _read_json(os.path.join(config_dir(home), "estatisticas.json"), {})
+    events = []
+    for raw in data.get("limpezas", []) if isinstance(data, dict) else []:
+        try:
+            event = {"quando": int(raw["quando"]), "cookies": int(raw["cookies"]),
+                     "sessao": str(raw["sessao"])}
+            date.fromtimestamp(event["quando"])
+        except (KeyError, TypeError, ValueError, OverflowError, OSError):
+            continue
+        if event["cookies"] > 0:
+            events.append(event)
+    return sorted(events, key=lambda event: event["quando"])
+
+
+def record_cleanup(count: int, home: str | None = None) -> None:
+    """Anota que esta sessão eliminou count cookies agora. Nunca falha: a estatística
+    não pode atrapalhar a limpeza."""
+    if count <= 0:
+        return
+    try:
+        now = int(time.time())
+        events = [event for event in _cleanups(home)
+                  if event["quando"] >= now - STATS_KEEP_DAYS * 86400]
+        events.append({"quando": now, "cookies": count, "sessao": SESSION_ID})
+        _write_text(os.path.join(config_dir(home), "estatisticas.json"),
+                    json.dumps({"limpezas": events}, indent=1) + "\n")
+    except OSError:
+        pass
+
+
+def load_stats(home: str | None = None, now: float | None = None) -> dict:
+    """Cookies eliminados na última sessão que limpou algo e nos últimos 7 dias (hoje e
+    os 6 anteriores): {"session", "session_when", "week", "week_runs", "days"}."""
+    events = _cleanups(home)
+    today = date.fromtimestamp(time.time() if now is None else now)
+    days = [today - timedelta(days=back) for back in range(6, -1, -1)]
+    per_day: Counter = Counter()
+    runs = 0
+    for event in events:
+        day = date.fromtimestamp(event["quando"])
+        if days[0] <= day <= today:
+            per_day[day] += event["cookies"]
+            runs += 1
+    last = events[-1] if events else None
+    return {"session": sum(e["cookies"] for e in events if e["sessao"] == last["sessao"])
+            if last else 0,
+            "session_when": last["quando"] if last else None,
+            "week": sum(per_day.values()), "week_runs": runs,
+            "days": [(day, per_day[day]) for day in days]}
+
+
+def when_text(epoch: float, now: float | None = None) -> str:
+    day = date.fromtimestamp(epoch)
+    today = date.fromtimestamp(time.time() if now is None else now)
+    hour = time.strftime("%H:%M", time.localtime(epoch))
+    if day == today:
+        return f"hoje às {hour}"
+    if day == today - timedelta(days=1):
+        return f"ontem às {hour}"
+    return f"{day:%d/%m/%Y} às {hour}"
+
+
+def stats_view(stats: dict, now: float | None = None) -> dict:
+    """Os textos do monitor da página inicial, iguais nas duas janelas.
+    bars: [(dia da semana, fração da barra mais alta, dica, é hoje)]."""
+    top = max(n for _day, n in stats["days"]) or 1
+    runs = stats["week_runs"]
+    return {
+        "session": fmt_num(stats["session"]),
+        "session_note": when_text(stats["session_when"], now)
+        if stats["session_when"] else "Nenhuma limpeza ainda",
+        "week": fmt_num(stats["week"]),
+        "week_note": f"em {fmt_num(runs)} limpeza{'s' if runs != 1 else ''}" if runs
+        else "Nenhuma limpeza nestes dias",
+        "bars": [(WEEKDAYS[day.weekday()], n / top,
+                  f"{WEEKDAYS[day.weekday()]}, {day:%d/%m}: {deleted_text(n)}",
+                  index == 6) for index, (day, n) in enumerate(stats["days"])],
+    }
+
+
+# --------------------------------------------------------------------------- configurações
+#
+# config.json guarda as escolhas da aba Configurações. "Iniciar com o sistema" abre a
+# janela no início da sessão: arquivo em ~/.config/autostart no Linux, valor Run do
+# registro do usuário no Windows.
+
+SETTINGS = {"iniciar_com_sistema": False, "iniciar_minimizado": False}
+SETTING_TEXTS = {
+    "iniciar_com_sistema": (
+        "Iniciar com o sistema",
+        f"Abre o {APP_NAME} sozinho quando você liga o computador e entra na sua conta."),
+    "iniciar_minimizado": (
+        "Abrir minimizado",
+        "Ao iniciar com o sistema, a janela fica minimizada até você precisar dela."),
+}
+
+
+def load_settings(home: str | None = None) -> dict:
+    data = _read_json(os.path.join(config_dir(home), "config.json"), {})
+    data = data if isinstance(data, dict) else {}
+    return {key: bool(data.get(key, default)) for key, default in SETTINGS.items()}
+
+
+def linux_autostart_file(command: list[str], minimized: bool) -> str:
+    """O .desktop que abre a janela no início da sessão."""
+    args = command + (["--minimizado"] if minimized else [])
+    # no .desktop a barra invertida é escapada mais uma vez e o % é dobrado
+    line = _quoted(args, "%", "`$").replace("\\", "\\\\")
+    return ("[Desktop Entry]\nType=Application\n"
+            f"Name={APP_NAME}\nExec={line}\nIcon={APP_ID}\nTerminal=false\n"
+            "X-GNOME-Autostart-enabled=true\n")
+
+
+def sync_autostart(settings: dict, home: str | None = None) -> list[str]:
+    """Deixa o início com o sistema igual ao que as configurações pedem. Devolve avisos."""
+    if home:                                      # pasta de teste: não mexe no sistema
+        return []
+    enabled, minimized = settings["iniciar_com_sistema"], settings["iniciar_minimizado"]
+    try:
+        if WINDOWS:
+            args = _self_command() + (["--minimizado"] if minimized else [])
+            _windows_run_value("LimpaCookiesJanela",
+                               subprocess.list2cmdline(args) if enabled else None)
+        else:
+            path = os.path.join(_xdg_config(), "autostart", APP_ID + ".desktop")
+            if enabled:
+                _write_text(path, linux_autostart_file(_self_command(), minimized))
+            elif os.path.exists(path):
+                os.remove(path)
+    except OSError as exc:
+        return [f"Não consegui configurar o início com o sistema: {exc}"]
+    return []
+
+
+def save_settings(settings: dict, home: str | None = None) -> list[str]:
+    """Grava as configurações e aplica no sistema. Devolve avisos."""
+    try:
+        _write_text(os.path.join(config_dir(home), "config.json"),
+                    json.dumps(settings, ensure_ascii=False, indent=2) + "\n")
+    except OSError as exc:
+        return [f"Não consegui gravar as configurações: {exc}"]
+    return sync_autostart(settings, home)
 
 
 # --------------------------------------------------------------------------- comum às janelas
@@ -983,11 +1149,19 @@ def scan_safely(home: str | None) -> tuple[list[Cookie], list[str]]:
         return [], [f"Falha na verificação: {exc}"]
 
 
-def delete_safely(cookies: list[Cookie]) -> dict:
+def delete_safely(cookies: list[Cookie], home: str | None) -> dict:
+    """Elimina e anota nas estatísticas."""
     try:
-        return delete(cookies)
+        outcome = delete(cookies)
     except Exception as exc:
         return {"deleted": 0, "skipped": Counter(), "errors": [str(exc)]}
+    record_cleanup(outcome["deleted"], home)
+    return outcome
+
+
+TABS = [("inicio", "Início"), ("cookies", "Cookies"), ("config", "Configurações")]
+IDLE_TITLE = "Nenhuma verificação ainda"
+IDLE_TEXT = "Clique em Verificar cookies para listar o que está guardado nesta conta."
 
 
 def footer_text(total: int, shown: int, picked: int, in_session: int) -> str:
@@ -1077,8 +1251,8 @@ def _gtk_css() -> str:
         button.eliminar {{ background-color: alpha({t["danger"]}, 0.14); color: {t["danger"]}; }}
         button.eliminar:hover {{ background-color: alpha({t["danger"]}, 0.22); }}
         button.eliminar:active {{ background-color: alpha({t["danger"]}, 0.30); }}
-        .inicio {{ background-image: radial-gradient(circle at 50% 27%,
-                   alpha({t["accent"]}, 0.17), transparent 34%); }}
+        .inicio {{ background-image: radial-gradient(circle at 50% 12%,
+                   alpha({t["accent"]}, 0.13), transparent 38%); }}
         .inicio-titulo {{ font-size: 26pt; font-weight: 800; }}
         .inicio-texto {{ color: {t["fg_dim"]}; font-size: 11.5pt; }}
         .inicio-nota {{ color: {t["fg_muted"]}; font-size: 9.5pt; }}
@@ -1091,10 +1265,21 @@ def _gtk_css() -> str:
                         border-radius: 10px; padding: 9px; }}
         .cartao-texto {{ color: {t["fg_dim"]}; }}
         .cartao-estado {{ color: {t["accent"]}; font-size: 9.5pt; font-weight: 600; }}
+        .monitor {{ background-color: {t["surface"]}; border: 1px solid {t["border"]};
+                   border-radius: 16px; padding: 16px 18px; }}
+        .monitor-rotulo {{ color: {t["fg_muted"]}; font-size: 9.5pt; font-weight: 600; }}
+        .monitor-numero {{ font-size: 21pt; font-weight: 800;
+                          font-feature-settings: "tnum"; }}
+        .monitor-nota {{ color: {t["fg_dim"]}; font-size: 9.5pt; }}
+        .barra {{ background-color: {t["accent"]}; border-radius: 4px 4px 0 0;
+                 min-width: 18px; }}
+        .barra.vazia {{ background-color: {t["border"]}; border-radius: 0; }}
+        .barra-dia {{ color: {t["fg_muted"]}; font-size: 8.5pt; }}
+        .barra-dia.hoje {{ color: {t["fg"]}; font-weight: 700; }}
     """
 
 
-def run_gui(home: str | None) -> int:
+def run_gui(home: str | None, minimized: bool = False) -> int:
     import gi
     gi.require_version("Gtk", "4.0")
     gi.require_version("Adw", "1")
@@ -1134,6 +1319,8 @@ def run_gui(home: str | None) -> int:
             self.busy = False
             self.updating_dropdown = False
             self.rules = load_rules(home)
+            self.settings = load_settings(home)
+            sync_autostart(self.settings, home)   # o programa pode ter mudado de pasta
 
             self.btn_scan = Gtk.Button(label="Verificar cookies")
             self.btn_scan.add_css_class("suggested-action")
@@ -1175,18 +1362,34 @@ def run_gui(home: str | None) -> int:
             page_list.append(Gtk.Separator())
             page_list.append(scroller)
 
-            page_start = self._start_page()
+            scan_now = Gtk.Button(label="Verificar cookies", halign=Gtk.Align.CENTER)
+            scan_now.add_css_class("pill")
+            scan_now.add_css_class("suggested-action")
+            scan_now.connect("clicked", self.on_scan)
+            page_idle = Adw.StatusPage(icon_name="edit-find-symbolic", title=IDLE_TITLE,
+                                       description=IDLE_TEXT, child=scan_now)
             spinner = Gtk.Spinner(spinning=True, width_request=32, height_request=32,
                                   halign=Gtk.Align.CENTER)
             page_busy = Adw.StatusPage(title="Trabalhando…", child=spinner)
             self.page_empty = Adw.StatusPage(icon_name="emblem-ok-symbolic",
                                              title="Nenhum cookie guardado")
 
-            self.stack = Gtk.Stack(vexpand=True)
-            self.stack.add_named(page_start, "start")
+            # aba Cookies: uma página por situação
+            self.stack = Gtk.Stack()
+            self.stack.add_named(page_idle, "idle")
             self.stack.add_named(page_busy, "busy")
             self.stack.add_named(self.page_empty, "empty")
             self.stack.add_named(page_list, "list")
+
+            self.tabs = Adw.ViewStack(vexpand=True)
+            pages = {"inicio": (self._start_page(), "go-home-symbolic"),
+                     "cookies": (self.stack, "view-list-symbolic"),
+                     "config": (self._settings_page(), "emblem-system-symbolic")}
+            for key, title in TABS:
+                self.tabs.add_titled_with_icon(pages[key][0], key, title, pages[key][1])
+            self.tabs.connect("notify::visible-child-name", self._on_tab)
+            header.set_title_widget(Adw.ViewSwitcher(stack=self.tabs,
+                                                     policy=Adw.ViewSwitcherPolicy.WIDE))
 
             self.footer = Gtk.Label(xalign=0, wrap=True, margin_top=6, margin_bottom=6,
                                     margin_start=10, margin_end=10,
@@ -1195,13 +1398,18 @@ def run_gui(home: str | None) -> int:
             footer_bar.add_css_class("rodape")
             footer_bar.append(self.footer)
             body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-            body.append(self.stack)
+            body.append(self.tabs)
             body.append(Gtk.Separator())
             body.append(footer_bar)
             self.toasts = Adw.ToastOverlay(child=body)
             layout = Adw.ToolbarView(content=self.toasts)
             layout.add_top_bar(header)
             self.set_content(layout)
+            self._refresh_stats()
+
+        def _on_tab(self, *_):
+            if self.tabs.get_visible_child_name() == "inicio":
+                self._refresh_stats()             # limpezas automáticas contam também
 
         # ---- página inicial
         def _card(self, icon_name, title, text, state, handler, primary=False):
@@ -1224,13 +1432,71 @@ def run_gui(home: str | None) -> int:
             button.connect("clicked", handler)
             return button, status
 
+        BAR_HEIGHT = 46
+
+        def _monitor(self):
+            """Painel com os cookies eliminados: última sessão, 7 dias e um gráfico por dia."""
+            def tile(title):
+                head = Gtk.Label(label=title, xalign=0)
+                head.add_css_class("monitor-rotulo")
+                number = Gtk.Label(xalign=0)
+                number.add_css_class("monitor-numero")
+                note = Gtk.Label(xalign=0)
+                note.add_css_class("monitor-nota")
+                box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2, hexpand=True,
+                              valign=Gtk.Align.END)
+                for widget in (head, number, note):
+                    box.append(widget)
+                return box, number, note
+
+            session, self.stat_session, self.stat_session_note = tile("Última sessão")
+            week, self.stat_week, self.stat_week_note = tile("Últimos 7 dias")
+            chart = Gtk.Box(spacing=8, valign=Gtk.Align.END)
+            self.stat_bars = []
+            for _day in range(7):
+                bar = Gtk.Box(valign=Gtk.Align.END)
+                bar.add_css_class("barra")
+                slot = Gtk.Box(height_request=self.BAR_HEIGHT, halign=Gtk.Align.CENTER)
+                slot.append(bar)
+                day = Gtk.Label()
+                day.add_css_class("barra-dia")
+                column = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+                column.append(slot)
+                column.append(day)
+                chart.append(column)
+                self.stat_bars.append((column, bar, day))
+            tiles = Gtk.Box(spacing=18, homogeneous=True, hexpand=True)
+            tiles.append(session)
+            tiles.append(week)
+            row = Gtk.Box(spacing=18)
+            row.append(tiles)
+            row.append(chart)
+            head = Gtk.Label(label="Cookies eliminados", xalign=0)
+            head.add_css_class("heading")
+            panel = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12, margin_top=22)
+            panel.add_css_class("monitor")
+            panel.append(head)
+            panel.append(row)
+            return panel
+
+        def _refresh_stats(self):
+            view = stats_view(load_stats(home))
+            self.stat_session.set_text(view["session"])
+            self.stat_session_note.set_text(view["session_note"])
+            self.stat_week.set_text(view["week"])
+            self.stat_week_note.set_text(view["week_note"])
+            for (column, bar, day), (label, share, tip, today) in zip(self.stat_bars,
+                                                                      view["bars"]):
+                bar.set_size_request(-1, max(2, round(self.BAR_HEIGHT * share)))
+                column.set_tooltip_text(tip)
+                day.set_text(label)
+                for widget, name, on in ((bar, "vazia", not share), (day, "hoje", today)):
+                    if on:
+                        widget.add_css_class(name)
+                    else:
+                        widget.remove_css_class(name)
+
         def _start_page(self):
-            icon = Gtk.Image(pixel_size=104)
-            svg = _resource("icone.svg")          # rodando da pasta do projeto
-            if svg:
-                icon.set_from_file(svg)
-            else:                                 # instalado: ícone do tema
-                icon.set_from_icon_name(APP_ID)
             title = Gtk.Label(label=APP_NAME, margin_top=6)
             title.add_css_class("inicio-titulo")
             text = Gtk.Label(justify=Gtk.Justification.CENTER,
@@ -1245,7 +1511,7 @@ def run_gui(home: str | None) -> int:
                 "alarm-symbolic", "Limpeza automática",
                 "Programe: a cada sessão, num horário ou ao desligar, por site.",
                 rules_summary(self.rules), self.on_rules)
-            cards = Gtk.Box(spacing=14, homogeneous=True, margin_top=24)
+            cards = Gtk.Box(spacing=14, homogeneous=True, margin_top=6)
             cards.append(scan_card)
             cards.append(rules_card)
             note = Gtk.Label(label="O valor dos cookies nunca é lido nem mostrado.",
@@ -1254,12 +1520,38 @@ def run_gui(home: str | None) -> int:
             column = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8,
                              valign=Gtk.Align.CENTER, margin_top=24, margin_bottom=24,
                              margin_start=24, margin_end=24)
-            for widget in (icon, title, text, cards, note):
+            for widget in (title, text, self._monitor(), cards, note):
                 column.append(widget)
             page = Gtk.Box()
             page.add_css_class("inicio")
             page.append(Adw.Clamp(maximum_size=660, child=column, hexpand=True))
             return page
+
+        # ---- configurações
+        def _settings_page(self):
+            startup = Adw.PreferencesGroup(title="Inicialização")
+            self.setting_rows = {}
+            for key, (title, text) in SETTING_TEXTS.items():
+                row = Adw.SwitchRow(title=title, subtitle=text, active=self.settings[key])
+                row.connect("notify::active", self._on_setting, key)
+                startup.add(row)
+                self.setting_rows[key] = row
+            self.setting_rows["iniciar_minimizado"].set_sensitive(
+                self.settings["iniciar_com_sistema"])
+            about = Adw.PreferencesGroup(title="Sobre")
+            about.add(Adw.ActionRow(title=APP_NAME, subtitle=f"Versão {APP_VERSION}"))
+            page = Adw.PreferencesPage()
+            page.add(startup)
+            page.add(about)
+            return page
+
+        def _on_setting(self, row, _pspec, key):
+            self.settings[key] = row.get_active()
+            self.setting_rows["iniciar_minimizado"].set_sensitive(
+                self.settings["iniciar_com_sistema"])
+            warnings = save_settings(self.settings, home)
+            if warnings:
+                self._alert("Configuração não aplicada", "\n".join(warnings))
 
         # ---- limpeza automática
         def on_rules(self, *_):
@@ -1416,6 +1708,7 @@ def run_gui(home: str | None) -> int:
             self.btn_delete.set_sensitive(False)
             if busy:
                 self.stack.set_visible_child_name("busy")
+                self.tabs.set_visible_child_name("cookies")
 
         # Os cliques só agendam o trabalho: mexer na tela (trocar de página, abrir diálogo)
         # dentro do próprio "clicked" deixa o GTK com o botão preso como "pressionado".
@@ -1473,6 +1766,7 @@ def run_gui(home: str | None) -> int:
             if not rows:
                 return False
             targets = [r.cookie for r in rows]
+            self.tabs.set_visible_child_name("cookies")   # a lista de que a pergunta fala
             heading, body = delete_question(targets, bool(picked), len(self.cookies))
             dialog = Adw.AlertDialog(heading=heading, body=body)
             dialog.add_response("cancel", "Cancelar")
@@ -1495,7 +1789,7 @@ def run_gui(home: str | None) -> int:
             self.footer.set_text("Eliminando…")
 
             def work():
-                outcome = delete_safely(targets)
+                outcome = delete_safely(targets, home)
                 GLib.idle_add(self._delete_done, outcome, scan_safely(home))
 
             threading.Thread(target=work, daemon=True).start()
@@ -1503,6 +1797,7 @@ def run_gui(home: str | None) -> int:
 
         def _delete_done(self, outcome, result):
             self._scan_done(result)
+            self._refresh_stats()
             self.toasts.add_toast(Adw.Toast(title=deleted_text(outcome["deleted"])))
             notes = delete_notes(outcome)
             if notes:
@@ -1522,8 +1817,14 @@ def run_gui(home: str | None) -> int:
             Gdk.Display.get_default(), provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
 
     def on_activate(app):
-        win = app.get_active_window() or Window(app)
+        win = app.get_active_window()
+        if win:
+            win.present()
+            return
+        win = Window(app)
         win.present()
+        if minimized:
+            win.minimize()
 
     application = Adw.Application(application_id=APP_ID)
     application.connect("startup", on_startup)
@@ -1537,18 +1838,6 @@ def _resource(name: str) -> str | None:
     """Arquivo que acompanha o programa: ao lado dele, em windows/ ou dentro do .exe."""
     base = getattr(sys, "_MEIPASS", None) or os.path.dirname(os.path.abspath(__file__))
     for path in (os.path.join(base, name), os.path.join(base, "windows", name)):
-        if os.path.exists(path):
-            return path
-    return None
-
-
-def _icon_png() -> str | None:
-    """Ícone em PNG para a página inicial da janela Tk."""
-    found = _resource("icone.png")
-    if found:
-        return found
-    for base in ("/usr/share", os.path.expanduser("~/.local/share")):   # instalado no Linux
-        path = os.path.join(base, "icons", "hicolor", "128x128", "apps", APP_ID + ".png")
         if os.path.exists(path):
             return path
     return None
@@ -1587,7 +1876,7 @@ def _win_dark_titlebar(window) -> None:
         pass
 
 
-def run_gui_tk(home: str | None) -> int:
+def run_gui_tk(home: str | None, minimized: bool = False) -> int:
     try:
         import tkinter as tk
         from tkinter import font as tkfont, ttk
@@ -1630,6 +1919,8 @@ def run_gui_tk(home: str | None) -> int:
     small.configure(size=int(base.cget("size") * 0.9))
     small_bold = small.copy()
     small_bold.configure(weight="bold")
+    stat = base.copy()
+    stat.configure(size=int(base.cget("size") * 2.1), weight="bold")
 
     style = ttk.Style(root)
     style.theme_use("clam")
@@ -1712,6 +2003,11 @@ def run_gui_tk(home: str | None) -> int:
             self.search_job = None
             self.rules = load_rules(home)
             self.rules_window = None
+            self.settings = load_settings(home)
+            sync_autostart(self.settings, home)    # o programa pode ter mudado de pasta
+            self.tab = "inicio"
+            self.cookie_page = "idle"              # página da aba Cookies
+            self.bar_tips: list[str] = []
             self.results: queue.Queue = queue.Queue()
             self._build()
             self._poll()
@@ -1720,15 +2016,24 @@ def run_gui_tk(home: str | None) -> int:
         def _build(self):
             header = ttk.Frame(root, style="Bar.TFrame", padding=(px(10), px(8)))
             header.pack(fill="x")
-            self.btn_scan = ttk.Button(header, text="Verificar cookies", style="Accent.TButton",
-                                       command=self.start_scan)
-            self.btn_scan.pack(side="left")
-            ttk.Button(header, text="Limpeza automática",
-                       command=self.show_rules).pack(side="left", padx=(px(8), 0))
+            self.tab_labels = {}
+            for key, text in TABS:                 # abas, à esquerda
+                label = tk.Label(header, text=text, font=bold, bd=0, padx=px(12), pady=px(6),
+                                 cursor="hand2")
+                label.pack(side="left", padx=(0, px(4)))
+                label.bind("<Button-1>", lambda _event, k=key: self.select_tab(k))
+                label.bind("<Enter>", lambda _event, k=key: self.paint_tab(k, True))
+                label.bind("<Leave>", lambda _event, k=key: self.paint_tab(k, False))
+                self.tab_labels[key] = label
             self.btn_delete = ttk.Button(header, text="Eliminar cookies", style="Danger.TButton",
                                          command=self.ask_delete)
             self.btn_delete.state(["disabled"])
             self.btn_delete.pack(side="right")
+            ttk.Button(header, text="Limpeza automática",
+                       command=self.show_rules).pack(side="right", padx=(0, px(8)))
+            self.btn_scan = ttk.Button(header, text="Verificar cookies", style="Accent.TButton",
+                                       command=self.start_scan)
+            self.btn_scan.pack(side="right", padx=(0, px(8)))
             line(root).pack(fill="x")
 
             footer = ttk.Frame(root, style="Bar.TFrame", padding=(px(10), px(6)))
@@ -1744,7 +2049,7 @@ def run_gui_tk(home: str | None) -> int:
             body.rowconfigure(0, weight=1)
             body.columnconfigure(0, weight=1)
             self.pages = {}
-            for name in ("start", "busy", "empty", "list"):
+            for name in ("start", "idle", "busy", "empty", "list", "config"):
                 self.pages[name] = ttk.Frame(body)
                 self.pages[name].grid(row=0, column=0, sticky="nsew")
 
@@ -1754,17 +2059,11 @@ def run_gui_tk(home: str | None) -> int:
                 return box
 
             box = centered("start")
-            png = _icon_png()
-            if png:
-                try:
-                    self.icon = tk.PhotoImage(file=png)     # guardada: o Tk não segura a imagem
-                    ttk.Label(box, image=self.icon).pack(pady=(0, px(4)))
-                except tk.TclError:
-                    pass
             ttk.Label(box, text=APP_NAME, style="Hero.TLabel").pack()
             ttk.Label(box, style="Dim.TLabel", justify="center",
                       text="Veja e elimine os cookies que navegadores e aplicativos\n"
-                           "guardaram nesta conta.").pack(pady=(px(6), px(24)))
+                           "guardaram nesta conta.").pack(pady=(px(6), px(22)))
+            self.monitor(box).pack(fill="x", pady=(0, px(14)))
             cards = ttk.Frame(box)
             cards.pack()
             card, _state = self.card(
@@ -1779,6 +2078,11 @@ def run_gui_tk(home: str | None) -> int:
             card.grid(row=0, column=1, sticky="nsew")
             ttk.Label(box, text="O valor dos cookies nunca é lido nem mostrado.",
                       style="Muted.TLabel").pack(pady=(px(18), 0))
+            box = centered("idle")
+            ttk.Label(box, text=IDLE_TITLE, style="Title.TLabel").pack()
+            ttk.Label(box, text=IDLE_TEXT, style="Dim.TLabel").pack(pady=(px(6), px(18)))
+            ttk.Button(box, text="Verificar cookies", style="Accent.TButton",
+                       command=self.start_scan).pack()
             box = centered("busy")
             ttk.Label(box, text="Trabalhando…", style="Title.TLabel").pack(pady=(0, px(16)))
             self.progress = ttk.Progressbar(box, mode="indeterminate", length=px(220))
@@ -1821,10 +2125,149 @@ def run_gui_tk(home: str | None) -> int:
             for key in ("<Control-a>", "<Control-A>"):
                 self.tree.bind(key, lambda _event: self.tree.selection_set(self.visible))
             self.tree.bind("<Escape>", lambda _event: self.tree.selection_set(()))
-            self.show("start")
+            self.build_settings()
+            self.select_tab("inicio")
 
+        # ---- abas
         def show(self, name):
-            self.pages[name].tkraise()
+            """Mostra uma das páginas da aba Cookies: idle, busy, empty ou list."""
+            self.cookie_page = name
+            self.select_tab("cookies")
+
+        def select_tab(self, tab):
+            self.tab = tab
+            if tab == "inicio":
+                self.refresh_stats()               # limpezas automáticas contam também
+            self.pages[{"inicio": "start", "cookies": self.cookie_page,
+                        "config": "config"}[tab]].tkraise()
+            for key in self.tab_labels:
+                self.paint_tab(key, False)
+
+        def paint_tab(self, key, inside):
+            chosen = key == self.tab
+            self.tab_labels[key].configure(
+                bg=T["raised"] if chosen else T["surface"] if inside else T["bar"],
+                fg=T["fg"] if chosen or inside else T["fg_dim"])
+
+        # ---- monitor da página inicial
+        BAR, BAR_GAP, BAR_HEIGHT, BAR_SIDE = 18, 8, 46, 6
+
+        def monitor(self, parent):
+            """Painel com os cookies eliminados: última sessão, 7 dias e um gráfico por dia."""
+            panel = tk.Frame(parent, bg=T["surface"], padx=px(18), pady=px(14),
+                             highlightthickness=1, highlightbackground=T["border"])
+            look = dict(bg=T["surface"], anchor="w")
+            tk.Label(panel, text="Cookies eliminados", fg=T["fg"], font=bold, **look).grid(
+                row=0, column=0, sticky="w", pady=(0, px(10)))
+            # valor do dia sob o ponteiro, no gráfico
+            self.bar_tip = tk.Label(panel, bg=T["surface"], fg=T["fg_dim"], font=small,
+                                    anchor="e")
+            self.bar_tip.grid(row=0, column=1, columnspan=2, sticky="e", pady=(0, px(10)))
+            self.stat_labels = {}
+            for column, (key, title) in enumerate((("session", "Última sessão"),
+                                                   ("week", "Últimos 7 dias"))):
+                cell = tk.Frame(panel, bg=T["surface"])
+                cell.grid(row=1, column=column, sticky="sw", padx=(0, px(24)))
+                panel.columnconfigure(column, weight=1)
+                tk.Label(cell, text=title, fg=T["fg_muted"], font=small_bold, **look).pack(
+                    fill="x")
+                for name, color, font in ((key, T["fg"], stat),
+                                          (key + "_note", T["fg_dim"], small)):
+                    self.stat_labels[name] = tk.Label(cell, fg=color, font=font, **look)
+                    self.stat_labels[name].pack(fill="x")
+            self.chart = tk.Canvas(panel, bg=T["surface"], highlightthickness=0, bd=0,
+                                   width=px(7 * self.BAR + 6 * self.BAR_GAP
+                                            + 2 * self.BAR_SIDE),
+                                   height=px(self.BAR_HEIGHT + 20))
+            self.chart.grid(row=1, column=2, sticky="se")
+            self.chart.bind("<Motion>", self.on_chart)
+            self.chart.bind("<Leave>", lambda _event: self.bar_tip.configure(text=""))
+            return panel
+
+        def on_chart(self, event):
+            step = px(self.BAR + self.BAR_GAP)
+            index = int((event.x - px(self.BAR_SIDE) + px(self.BAR_GAP) / 2) // step)
+            if 0 <= index < len(self.bar_tips):
+                self.bar_tip.configure(text=self.bar_tips[index])
+
+        def refresh_stats(self):
+            view = stats_view(load_stats(home))
+            for key in ("session", "session_note", "week", "week_note"):
+                self.stat_labels[key].configure(text=view[key])
+            self.bar_tips = [tip for _label, _share, tip, _today in view["bars"]]
+            width, floor = px(self.BAR), px(self.BAR_HEIGHT)
+            self.chart.delete("all")
+            for index, (label, share, _tip, today) in enumerate(view["bars"]):
+                left = px(self.BAR_SIDE) + index * px(self.BAR + self.BAR_GAP)
+                tall = max(px(2), round(floor * share))
+                self.chart.create_rectangle(left, floor - tall, left + width, floor, width=0,
+                                            fill=T["accent"] if share else T["border"])
+                self.chart.create_text(left + width / 2, floor + px(11), text=label,
+                                       font=small_bold if today else small,
+                                       fill=T["fg"] if today else T["fg_muted"])
+
+        # ---- configurações
+        def build_settings(self):
+            box = ttk.Frame(self.pages["config"], padding=(px(24), px(26)))
+            box.place(relx=0.5, y=0, anchor="n", width=px(640))
+            ttk.Label(box, text="Configurações", style="Title.TLabel").pack(anchor="w")
+            ttk.Label(box, text="Inicialização", style="Dim.TLabel", font=bold).pack(
+                anchor="w", pady=(px(18), px(8)))
+            card = tk.Frame(box, bg=T["surface"], padx=px(18), pady=px(4),
+                            highlightthickness=1, highlightbackground=T["border"])
+            card.pack(fill="x")
+            self.setting_switches = {}
+            for index, (key, (title, text)) in enumerate(SETTING_TEXTS.items()):
+                if index:
+                    line(card).pack(fill="x")
+                row = tk.Frame(card, bg=T["surface"])
+                row.pack(fill="x", pady=px(12))
+                switch = tk.Canvas(row, bg=T["surface"], highlightthickness=0, bd=0,
+                                   width=px(self.SWITCH[0]), height=px(self.SWITCH[1]))
+                switch.pack(side="right", padx=(px(16), 0))
+                switch.bind("<Button-1>", lambda _event, k=key: self.on_setting(k))
+                look = dict(bg=T["surface"], anchor="w", justify="left")
+                tk.Label(row, text=title, fg=T["fg"], font=bold, **look).pack(fill="x")
+                tk.Label(row, text=text, fg=T["fg_dim"], font=base, wraplength=px(510),
+                         **look).pack(fill="x", pady=(px(2), 0))
+                self.setting_switches[key] = switch
+            self.settings_message = ttk.Label(box, style="Error.TLabel", justify="left",
+                                              wraplength=px(590))
+            self.settings_message.pack(anchor="w", pady=(px(10), 0))
+            ttk.Label(box, text=f"{APP_NAME} · versão {APP_VERSION}",
+                      style="Muted.TLabel").pack(anchor="w", pady=(px(8), 0))
+            self.paint_switches()
+
+        SWITCH = (42, 24)                          # largura e altura do interruptor
+
+        def setting_usable(self, key):
+            """Abrir minimizado só vale com o início com o sistema ligado."""
+            return key != "iniciar_minimizado" or self.settings["iniciar_com_sistema"]
+
+        def paint_switches(self):
+            width, height = (px(n) for n in self.SWITCH)
+            for key, switch in self.setting_switches.items():
+                on, usable = self.settings[key], self.setting_usable(key)
+                track = T["border"] if not usable else T["accent_bg"] if on else T["raised_hover"]
+                knob = T["fg_muted"] if not usable else T["on_accent"]
+                switch.configure(cursor="hand2" if usable else "")
+                switch.delete("all")
+                for left in (0, width - height):   # trilho: duas pontas redondas e o meio
+                    switch.create_oval(left, 0, left + height - 1, height - 1, width=0,
+                                       fill=track)
+                switch.create_rectangle(height / 2, 0, width - height / 2, height, width=0,
+                                        fill=track)
+                left, gap = (width - height if on else 0), px(3)
+                switch.create_oval(left + gap, gap, left + height - 1 - gap, height - 1 - gap,
+                                   width=0, fill=knob)
+
+        def on_setting(self, key):
+            if not self.setting_usable(key):
+                return
+            self.settings[key] = not self.settings[key]
+            self.paint_switches()
+            self.settings_message.configure(
+                text="\n".join(save_settings(self.settings, home)))
 
         def card(self, parent, title, text, state, command, primary=False):
             """Cartão clicável da página inicial. Devolve (cartão, rótulo da linha de estado)."""
@@ -2145,6 +2588,7 @@ def run_gui_tk(home: str | None) -> int:
             if not rows:
                 return
             targets = [self.cookies[int(iid)] for iid in rows]
+            self.select_tab("cookies")             # a lista de que a pergunta fala
             heading, body = delete_question(targets, bool(picked), len(self.cookies))
             self.dialog(heading, body, [("cancel", "Cancelar", "TButton"),
                                         ("delete", "Eliminar", "Danger.TButton")],
@@ -2154,7 +2598,8 @@ def run_gui_tk(home: str | None) -> int:
             if self.busy:
                 return
             self.set_busy(True, "Eliminando…")
-            self.work(lambda: (delete_safely(targets), scan_safely(home)), self.delete_done)
+            self.work(lambda: (delete_safely(targets, home), scan_safely(home)),
+                      self.delete_done)
 
         def delete_done(self, outcome, result):
             self.note = deleted_text(outcome["deleted"]) + "."
@@ -2166,7 +2611,7 @@ def run_gui_tk(home: str | None) -> int:
     App()
     root.geometry(f"{min(px(1200), root.winfo_screenwidth() - px(80))}"
                   f"x{min(px(680), root.winfo_screenheight() - px(120))}")
-    root.minsize(px(720), px(400))
+    root.minsize(px(900), px(540))
     if WINDOWS:
         icon = _resource("icone.ico")
         if icon:
@@ -2175,7 +2620,10 @@ def run_gui_tk(home: str | None) -> int:
             except tk.TclError:
                 pass
         _win_dark_titlebar(root)
-    root.deiconify()
+    if minimized:
+        root.iconify()
+    else:
+        root.deiconify()
     root.mainloop()
     return 0
 
@@ -2188,6 +2636,8 @@ def main() -> int:
                         help="usa DIR no lugar da pasta pessoal (para testes)")
     parser.add_argument("--tk", action="store_true",
                         help="no Linux, abre a janela Tk (a mesma do Windows)")
+    parser.add_argument("--minimizado", action="store_true",
+                        help="abre a janela minimizada (usado ao iniciar com o sistema)")
     parser.add_argument("--automatico", metavar="GATILHO", default=None,
                         help="executa as regras de limpeza automática de um gatilho "
                              "(inicio, desligar ou horario:HH:MM); usado pelo agendador")
@@ -2200,8 +2650,8 @@ def main() -> int:
         return 0
     # Linux: janela GTK; sem GTK 4 / libadwaita recentes (ou com --tk), a janela Tk
     if not WINDOWS and not args.tk and gtk_ready():
-        return run_gui(args.home)
-    return run_gui_tk(args.home)
+        return run_gui(args.home, args.minimizado)
+    return run_gui_tk(args.home, args.minimizado)
 
 
 if __name__ == "__main__":

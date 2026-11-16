@@ -28,7 +28,7 @@ if not defined VERSAO goto :erro
 echo [2/3] Gerando dist\LimpaCookies.exe (versao %VERSAO%)...
 build\venv\Scripts\pyinstaller --noconfirm --clean --log-level WARN --onefile --windowed ^
     --name LimpaCookies --icon "%CD%\windows\icone.ico" ^
-    --add-data "%CD%\windows\icone.ico;." --add-data "%CD%\windows\icone.png;." ^
+    --add-data "%CD%\windows\icone.ico;." ^
     --exclude-module gi ^
     --distpath dist --workpath build\pyinstaller --specpath build ^
     limpa_cookies.py || goto :erro

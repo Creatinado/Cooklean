@@ -3,7 +3,7 @@
 #
 #   ./instalar.sh            instala (ou atualiza)
 #   ./instalar.sh --fixar    instala e fixa na barra de favoritos do GNOME
-#   ./instalar.sh --remover  remove atalho, ícone e o favorito
+#   ./instalar.sh --remover  remove atalho, ícone, o favorito e o início com o sistema
 #
 # O atalho aponta para esta pasta. Se mover a pasta, rode o instalador de novo.
 set -euo pipefail
@@ -41,6 +41,8 @@ atualizar_caches() {
 if [[ "${1:-}" == "--remover" ]]; then
     favorito desafixar
     rm -f "$DESKTOP"
+    # "Iniciar com o sistema", ligado na aba Configurações do programa
+    rm -f "${XDG_CONFIG_HOME:-$HOME/.config}/autostart/$APP_ID.desktop"
     find "$ICONS" -name "$APP_ID.*" -delete 2>/dev/null || true
     atualizar_caches
     echo "Limpa Cookies removido do menu. A pasta $DIR não foi apagada."

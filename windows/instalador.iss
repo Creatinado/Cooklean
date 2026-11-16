@@ -34,6 +34,11 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 [Files]
 Source: "..\dist\LimpaCookies.exe"; DestDir: "{app}"; Flags: ignoreversion
 
+[Registry]
+; "Iniciar com o sistema" é ligado pelo próprio programa (aba Configurações);
+; aqui só se garante que desinstalar tira o programa do início de sessão.
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: none; ValueName: "LimpaCookiesJanela"; Flags: dontcreatekey uninsdeletevalue
+
 [Icons]
 Name: "{autoprograms}\Limpa Cookies"; Filename: "{app}\LimpaCookies.exe"; Comment: "Verifica e elimina os cookies guardados pelos navegadores"
 Name: "{autodesktop}\Limpa Cookies"; Filename: "{app}\LimpaCookies.exe"; Tasks: desktopicon
