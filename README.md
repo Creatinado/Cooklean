@@ -59,18 +59,27 @@ simples, que usa o `python3-tk`.
 
 ### Windows 10 e 11
 
+Baixe um destes arquivos da [versão mais recente](../../releases/latest):
+
+- `LimpaCookies-<versão>-Instalador.exe`: instala o programa e cria o atalho no menu
+  Iniciar.
+- `LimpaCookies.exe`: o programa completo num arquivo só, sem instalar. Basta abrir.
+
+Não precisa de Python nem de senha de administrador. Como o programa não tem assinatura
+digital, o Windows pode mostrar o aviso "O Windows protegeu o computador": clique em
+**Mais informações** e depois em **Executar assim mesmo**.
+
+<details>
+<summary>Gerar o <code>.exe</code> você mesmo</summary>
+
 1. Instale o [Python 3.9 ou mais novo](https://www.python.org/downloads/windows/).
 2. Baixe este projeto em **Code → Download ZIP** e extraia a pasta.
 3. Dê dois cliques em `windows\gerar_exe.bat`.
 
-O resultado fica na pasta `dist`:
+O resultado fica na pasta `dist`. O instalador só é gerado se o
+[Inno Setup 6](https://jrsoftware.org/isdl.php) estiver instalado.
 
-- `LimpaCookies.exe`: o programa completo num arquivo só. Basta copiar e abrir.
-- `LimpaCookies-<versão>-Instalador.exe`: instalador com atalho no menu Iniciar. Só é
-  gerado se o [Inno Setup 6](https://jrsoftware.org/isdl.php) estiver instalado.
-
-Os computadores onde o programa vai rodar não precisam de Python. Nada pede senha de
-administrador.
+</details>
 
 ## Como usar
 
