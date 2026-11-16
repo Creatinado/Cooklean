@@ -5,17 +5,18 @@
 <h1 align="center">Cooklean</h1>
 
 <p align="center">
-  <b>Limpa Cookies</b> para Linux e Windows: veja e elimine os cookies que navegadores
-  e aplicativos guardaram na sua conta.
+  <b>Limpa Cookies</b> para Linux e Windows: veja e elimine os cookies e as senhas salvas
+  que navegadores e aplicativos guardaram na sua conta.
 </p>
 
 <p align="center">
   <img src="docs/inicio.png" width="820" alt="Tela inicial com o monitor de cookies eliminados">
 </p>
 
-O valor dos cookies **nunca é lido nem mostrado**, e nada sai do seu computador: o programa
-não usa a internet. Ele só mostra de quem é cada cookie (aplicativo, perfil, site, nome,
-tipo e validade) e apaga os que você escolher.
+O valor dos cookies e as senhas **nunca são lidos nem mostrados**, e nada sai do seu
+computador: o programa não usa a internet. Ele só mostra de onde é cada cookie (aplicativo,
+perfil, site, nome, tipo e validade) e cada senha salva (aplicativo, perfil, site, usuário
+e datas), e apaga o que você escolher.
 
 ## O que ele faz
 
@@ -23,7 +24,8 @@ tipo e validade) e apaga os que você escolher.
 | --- | --- |
 | **Verificar cookies** | Lista tudo o que está guardado em disco, por aplicativo, perfil e site. Dá para filtrar por aplicativo, buscar por texto e ordenar por qualquer coluna. |
 | **Eliminar cookies** | Apaga tudo, só o que está na lista filtrada ou só as linhas selecionadas. Sempre pede confirmação antes. |
-| **Limpeza automática** | Regras que limpam sozinhas: de todos os sites ou só de alguns, ao iniciar a sessão, todos os dias num horário ou ao desligar o computador. |
+| **Senhas salvas** | Lista os sites com senha guardada nos navegadores e apaga as que você escolher, do mesmo jeito que os cookies. A senha em si nunca é lida nem decifrada. |
+| **Limpeza automática** | Regras que limpam sozinhas cookies, senhas salvas ou os dois: de todos os sites ou só de alguns, ao iniciar a sessão, todos os dias num horário ou ao desligar o computador. |
 | **Monitor de estatísticas** | Na tela inicial: quantos cookies foram eliminados na última sessão e nos últimos 7 dias, com um gráfico por dia. |
 | **Iniciar com o sistema** | Opção para o programa abrir sozinho quando você entra na sua conta, minimizado se quiser. |
 
@@ -94,22 +96,33 @@ encontrado; use o filtro por aplicativo e a busca para achar o que procura.
 está na lista) e clique em **Eliminar cookies**. Você será desconectado dos sites
 correspondentes. Aplicativos abertos são pulados: feche o navegador e repita.
 
-**3. Automatize.** Em **Limpeza automática**, escreva os sites (ou deixe vazio para
-todos), escolha quando e clique em **Adicionar regra**. Cada regra pode ser desligada sem
-ser apagada, e mostra quando rodou pela última vez.
+**3. Apague as senhas salvas.** Na aba **Senhas**, clique em **Verificar senhas** para
+ver os sites com senha guardada em cada navegador e perfil. Selecione as que quer apagar
+(ou nenhuma, para apagar todas as da lista) e clique em **Eliminar senhas**. Nesses sites
+será preciso digitar a senha de novo.
+
+<p align="center">
+  <img src="docs/senhas.png" width="820" alt="Aba Senhas com os sites que têm senha salva">
+</p>
+
+**4. Automatize.** Em **Limpeza automática**, escreva os sites (ou deixe vazio para
+todos), escolha **o que limpar** (cookies, senhas ou os dois) e **quando**, e clique em
+**Adicionar regra**. Uma regra "Cookies e senhas", de todos os sites, ao iniciar a sessão,
+deixa o computador sem senhas salvas e sem sessões abertas a cada vez que alguém entra.
+Cada regra pode ser desligada sem ser apagada, e mostra quando rodou pela última vez.
 
 <p align="center">
   <img src="docs/limpeza-automatica.png" width="820" alt="Janela de limpeza automática com três regras">
 </p>
 
-**4. Configure.** Na aba **Configurações**, ligue **Iniciar com o sistema** para o
-programa abrir sozinho a cada início de sessão.
+**5. Ajuste.** Na aba **Ajustes**, ligue **Iniciar com o sistema** para o programa abrir
+sozinho a cada início de sessão.
 
 <p align="center">
-  <img src="docs/configuracoes.png" width="820" alt="Aba Configurações com a opção de iniciar com o sistema">
+  <img src="docs/ajustes.png" width="820" alt="Aba Ajustes com a opção de iniciar com o sistema">
 </p>
 
-As imagens são da janela do Linux, com cookies fictícios. No Windows as telas e funções
+As imagens são da janela do Linux, com dados fictícios. No Windows as telas e funções
 são as mesmas.
 
 ## Bom saber
@@ -119,8 +132,21 @@ são as mesmas.
   Windows.
 - **No Windows, "ao desligar" limpa no início seguinte**, porque o sistema não deixa um
   programa comum rodar durante o desligamento.
-- **Eliminar não pode ser desfeito.** Os cookies são apagados de verdade do arquivo, não
-  só marcados como removidos.
+- **Eliminar não pode ser desfeito.** Cookies e senhas são apagados de verdade do arquivo,
+  não só marcados como removidos. No Firefox, a cópia de segurança das senhas
+  (`logins-backup.json`) é limpa junto.
+- **Senhas sincronizadas voltam.** Se o navegador sincroniza senhas com uma conta (Google,
+  Microsoft, Firefox), o que for apagado só neste computador volta da nuvem. Apague também
+  na conta (em passwords.google.com, por exemplo) ou desligue a sincronização de senhas.
+- **Navegador aberto é pulado.** No Windows, o Edge e o Chrome podem continuar rodando em
+  segundo plano depois de fechados. Para a limpeza ao iniciar a sessão não pular esses
+  navegadores, desligue nas configurações deles a "Aceleração de inicialização" (Edge) e
+  "Continuar executando apps em segundo plano" (os dois).
+- **"Nunca salvar neste site" continua.** Esses sites não têm senha, e manter a escolha
+  evita que o navegador volte a oferecer para salvar.
+- **No Firefox, o usuário também é guardado criptografado**, por isso a lista mostra só o
+  site. O Thunderbird entra na lista também: apagar as senhas dele faz o programa pedir de
+  novo a senha das contas de e-mail.
 - **Regras, configurações e estatísticas** ficam em `~/.config/limpa-cookies` no Linux e
   em `%APPDATA%\LimpaCookies` no Windows.
 
@@ -129,7 +155,7 @@ são as mesmas.
 | Comando | O que faz |
 | --- | --- |
 | `limpa_cookies.py` | Abre a janela. |
-| `limpa_cookies.py --resumo` | Imprime só a contagem de cookies por aplicativo. |
+| `limpa_cookies.py --resumo` | Imprime só a contagem de cookies e de senhas salvas por aplicativo. |
 | `limpa_cookies.py --minimizado` | Abre a janela minimizada. |
 | `limpa_cookies.py --tk` | No Linux, abre a janela simples (a mesma do Windows). |
 | `limpa_cookies.py --home PASTA` | Usa `PASTA` no lugar da pasta pessoal, para testes. |

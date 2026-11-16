@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Limpa Cookies: lista e elimina os cookies guardados em disco por navegadores e
-aplicativos desta conta (Firefox, Chrome, Chromium, Brave, Edge, apps Electron...).
-Funciona no Linux (janela GTK 4) e no Windows 10 e 11 (janela Tk).
+"""Limpa Cookies: lista e elimina os cookies e as senhas salvas que navegadores e
+aplicativos desta conta guardam em disco (Firefox, Chrome, Chromium, Brave, Edge, apps
+Electron...). Funciona no Linux (janela GTK 4) e no Windows 10 e 11 (janela Tk).
 
-O programa nunca lê nem mostra o VALOR dos cookies: só aplicativo, perfil, site, nome,
-tipo, validade e onde está guardado.
+O programa nunca lê nem mostra o VALOR dos cookies nem as senhas: só aplicativo, perfil,
+site, nome do cookie ou usuário, datas e onde está guardado.
 
 Uso:
     limpa_cookies.py              abre a janela
@@ -14,10 +14,10 @@ Uso:
     limpa_cookies.py --tk         no Linux, abre a janela Tk (a mesma do Windows)
     limpa_cookies.py --minimizado abre a janela minimizada (usado ao iniciar com o sistema)
 
-A janela também programa limpezas automáticas (ao iniciar a sessão, num horário, ao
-desligar), de todos os sites ou só de alguns; ver "limpeza automática" mais abaixo.
-Guarda quantos cookies foram eliminados (ver "estatísticas") e pode abrir sozinha
-quando o sistema inicia (ver "configurações").
+A janela também programa limpezas automáticas de cookies, de senhas ou dos dois (ao
+iniciar a sessão, num horário, ao desligar), de todos os sites ou só de alguns; ver
+"limpeza automática" mais abaixo. Guarda quantos cookies foram eliminados (ver
+"estatísticas") e pode abrir sozinha quando o sistema inicia (ver "configurações").
 """
 from __future__ import annotations
 
@@ -35,16 +35,24 @@ import time
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import date, timedelta
+from urllib.parse import urlsplit
 
 APP_ID = "local.LimpaCookies"
 APP_NAME = "Limpa Cookies"
-APP_VERSION = "1.3.0"
+APP_VERSION = "1.4.0"
 WINDOWS = sys.platform == "win32"
+
+COOKIES, PASSWORDS = "cookies", "senhas"       # o que o programa limpa
 
 KIND_SESSION = "Sessão"
 KIND_PERSISTENT = "Permanente"
 STORE_DB = "Banco de cookies"
 STORE_SESSION = "Restauração de sessão"
+
+# senhas dos navegadores tipo Chromium: as deste computador e as da conta (Google, Microsoft)
+LOGIN_FILES = ("Login Data", "Login Data For Account")
+# senhas do Firefox e parentes; a cópia de segurança também guarda tudo
+FIREFOX_LOGINS = ("logins.json", "logins-backup.json")
 
 MOZ_MAGIC = b"mozLz40\0"
 
@@ -138,6 +146,23 @@ class Cookie:
     in_use: bool    # o aplicativo está aberto agora
 
 
+@dataclass(frozen=True)
+class Password:
+    """Uma senha salva. A senha em si nunca é lida: só de onde ela é."""
+    app: str
+    profile: str
+    host: str       # site
+    user: str       # usuário; vazio no Firefox, que guarda o usuário criptografado
+    created: str    # data dd/mm/aaaa
+    created_sort: str
+    last_used: str  # data dd/mm/aaaa ou "nunca"
+    last_used_sort: str
+    source: str     # arquivo onde está
+    fmt: str        # chromium_logins | firefox_logins
+    key: tuple      # identificação dentro do arquivo
+    in_use: bool    # o aplicativo está aberto agora
+
+
 # --------------------------------------------------------------------------- utilidades
 
 def fmt_num(n: int) -> str:
@@ -151,6 +176,28 @@ def _date(epoch: float) -> tuple[str, str]:
         return time.strftime("%d/%m/%Y", t), time.strftime("%Y-%m-%d", t)
     except (OverflowError, OSError, ValueError):
         return "sem data", "9999-99-99"
+
+
+def _date_or(epoch: float, missing: str) -> tuple[str, str]:
+    """Como _date, mas com o texto missing quando não há data (zero ou negativa)."""
+    return _date(epoch) if epoch > 0 else (missing, "0000-00-00")
+
+
+def _chromium_epoch(value) -> float:
+    """Data do Chromium (microssegundos desde 1601) em segundos desde 1970; 0 se não há."""
+    return value / 1e6 - 11644473600 if isinstance(value, (int, float)) and value > 0 else 0
+
+
+def _site_of(url: str) -> str:
+    """'https://painel.exemplo.com/login' -> 'painel.exemplo.com'. Endereços que não são
+    de sites (android://..., chrome://...) ficam como estão."""
+    try:
+        parts = urlsplit(url)
+        if parts.scheme in ("http", "https", "ftp") and parts.hostname:
+            return parts.hostname
+    except ValueError:
+        pass
+    return url
 
 
 def _ro(path: str) -> sqlite3.Connection:
@@ -213,14 +260,36 @@ def _busy(path: str, opened: set[str] | None) -> bool:
 
 
 def _in_use(source: str, fmt: str, opened: set[str] | None) -> bool:
-    if fmt == "firefox_session":
+    if fmt in ("firefox_session", "firefox_logins"):
         prof = os.path.dirname(source)
         if os.path.basename(prof) == "sessionstore-backups":
             prof = os.path.dirname(prof)
-        guards = [os.path.join(prof, "cookies.sqlite"), os.path.join(prof, "places.sqlite")]
+        names = ["cookies.sqlite", "places.sqlite"]
+        if fmt == "firefox_logins":
+            # o Firefox lê logins.json e fecha o arquivo; a trava do perfil fica aberta
+            # enquanto ele roda (.parentlock no Linux, parent.lock no Windows)
+            names += [".parentlock", "parent.lock"]
+        guards = [os.path.join(prof, name) for name in names]
     else:
         guards = [source]
     return any(_busy(g, opened) for g in guards)
+
+
+def _overwrite(path: str, blob: bytes) -> None:
+    """Troca o conteúdo do arquivo por blob. Antes zera o conteúdo antigo, para que ele
+    não fique esquecido no disco."""
+    st = os.stat(path)
+    tmp = path + ".limpa-cookies.tmp"
+    with open(tmp, "wb") as fh:
+        fh.write(blob)
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.chmod(tmp, st.st_mode & 0o777)
+    with open(path, "r+b") as fh:
+        fh.write(b"\0" * st.st_size)
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(tmp, path)
 
 
 # --------------------------------------------------------------------------- mozlz4
@@ -293,18 +362,7 @@ def _mozlz4_write(path: str, data: dict) -> None:
     blob = MOZ_MAGIC + struct.pack("<I", len(body)) + _lz4_literals(body)
     if _lz4_block(blob[12:]) != body:
         raise ValueError("verificação do arquivo novo falhou")
-    st = os.stat(path)
-    tmp = path + ".limpa-cookies.tmp"
-    with open(tmp, "wb") as fh:
-        fh.write(blob)
-        fh.flush()
-        os.fsync(fh.fileno())
-    os.chmod(tmp, st.st_mode & 0o777)
-    with open(path, "r+b") as fh:          # apaga o conteúdo antigo antes de trocar
-        fh.write(b"\0" * st.st_size)
-        fh.flush()
-        os.fsync(fh.fileno())
-    os.replace(tmp, path)
+    _overwrite(path, blob)
 
 
 def _session_cookie_lists(node, out: list) -> None:
@@ -362,7 +420,9 @@ def _firefox_profiles(roots):
                 continue
             if (os.path.exists(os.path.join(ent.path, "cookies.sqlite"))
                     or os.path.exists(os.path.join(ent.path, "sessionstore.jsonlz4"))
-                    or os.path.isdir(os.path.join(ent.path, "sessionstore-backups"))):
+                    or os.path.isdir(os.path.join(ent.path, "sessionstore-backups"))
+                    or any(os.path.exists(os.path.join(ent.path, name))
+                           for name in FIREFOX_LOGINS)):
                 label = ent.name.split(".", 1)[1] if "." in ent.name else ent.name
                 yield app, label, ent.path
 
@@ -425,7 +485,8 @@ def _chromium_label(comps: list[str], suffix: str) -> tuple[str, str]:
     return app + suffix, "/".join(rest) or "principal"
 
 
-def _chromium_files(bases, windows: bool):
+def _chromium_files(bases, windows: bool, names=("Cookies",)):
+    """(aplicativo, perfil, caminho) de cada arquivo chamado names abaixo das bases."""
     if windows:                         # lá maiúsculas e minúsculas não distinguem pastas
         skip = {d.lower() for d in SKIP_DIRS | SKIP_DIRS_WINDOWS}
     for base, suffix in bases:
@@ -440,10 +501,12 @@ def _chromium_files(bases, windows: bool):
                 dirs[:] = sorted(d for d in dirs if d.lower() not in skip)
             else:
                 dirs[:] = sorted(d for d in dirs if d not in SKIP_DIRS)
-            if "Cookies" not in files or rel == ".":
+            if rel == ".":
                 continue
-            app, profile = _chromium_label(rel.split(os.sep), suffix)
-            yield app, profile, os.path.join(root, "Cookies")
+            for name in names:
+                if name in files:
+                    app, profile = _chromium_label(rel.split(os.sep), suffix)
+                    yield app, profile, os.path.join(root, name)
 
 
 def _scan_chromium_db(app, profile, path, opened, out, warnings):
@@ -504,19 +567,136 @@ def scan(home: str | None = None, windows: bool = WINDOWS) -> tuple[list[Cookie]
     return out, warnings
 
 
+# --------------------------------------------------------------------------- senhas salvas
+#
+# Só se lê de onde é cada senha: site, usuário (no Chromium) e datas. A senha, que o
+# navegador guarda criptografada, nunca é lida nem decifrada.
+
+def _firefox_login_key(login: dict) -> tuple:
+    return (str(login.get("guid") or ""), str(login.get("id") or ""),
+            str(login.get("hostname") or ""))
+
+
+def _ms_epoch(value) -> float:
+    """Milissegundos desde 1970 (como o Firefox guarda) em segundos; 0 se não há."""
+    return value / 1000 if isinstance(value, (int, float)) and value > 0 else 0
+
+
+def _scan_firefox_logins(app, profile, path, opened, out, warnings, seen):
+    used = _in_use(path, "firefox_logins", opened)
+    try:
+        with open(path, encoding="utf-8") as fh:
+            logins = json.load(fh).get("logins")
+    except (OSError, ValueError, AttributeError) as exc:
+        warnings.append(f"{app} ({profile}): não consegui ler as senhas salvas ({exc})")
+        return
+    for login in logins if isinstance(logins, list) else []:
+        if not isinstance(login, dict):
+            continue
+        key = _firefox_login_key(login)
+        if key in seen:                     # a mesma senha no logins.json e na cópia
+            continue
+        seen.add(key)
+        shown, sort = _date_or(_ms_epoch(login.get("timeCreated")), "sem data")
+        last, last_sort = _date_or(_ms_epoch(login.get("timeLastUsed")), "nunca")
+        out.append(Password(app, profile, _site_of(key[2]), "", shown, sort, last, last_sort,
+                            path, "firefox_logins", key, used))
+
+
+def _scan_chromium_logins(app, profile, path, opened, out, warnings):
+    if os.path.basename(path) == "Login Data For Account":
+        profile += " (conta)"
+    used = _in_use(path, "chromium_logins", opened)
+    try:
+        with open(path, "rb") as fh:
+            if fh.read(15) != b"SQLite format 3":
+                return
+    except OSError:
+        if used:        # no Windows, Chrome e Edge abertos travam o arquivo até para leitura
+            warnings.append(f"{app} ({profile}): está aberto e não deixa ler as senhas salvas. "
+                            "Feche o aplicativo e verifique de novo.")
+        return
+    try:
+        conn = _ro(path)
+        try:
+            cols = {r[1] for r in conn.execute("pragma table_info(logins)")}
+            if not {"origin_url", "username_value"} <= cols:
+                return
+
+            def col(name, default="0"):
+                return name if name in cols else default
+
+            # blacklisted_by_user marca o "Nunca salvar neste site": não tem senha e fica
+            rows = conn.execute(
+                f"select rowid, origin_url, {col('signon_realm', 'origin_url')}, "
+                f"username_value, {col('date_created')}, {col('date_last_used')} "
+                f"from logins where {col('blacklisted_by_user')} = 0").fetchall()
+        finally:
+            conn.close()
+    except sqlite3.Error as exc:
+        warnings.append(f"{app} ({profile}): não consegui ler as senhas salvas ({exc})")
+        return
+    for rid, origin, realm, user, created, last in rows:
+        shown, sort = _date_or(_chromium_epoch(created), "sem data")
+        last_shown, last_sort = _date_or(_chromium_epoch(last), "nunca")
+        name = user.decode("utf-8", "replace") if isinstance(user, bytes) else str(user or "")
+        out.append(Password(app, profile, _site_of(str(origin or realm or "")), name, shown,
+                            sort, last_shown, last_sort, path, "chromium_logins",
+                            (rid, origin, user), used))
+
+
+def scan_passwords(home: str | None = None,
+                   windows: bool = WINDOWS) -> tuple[list[Password], list[str]]:
+    """Lê de onde são as senhas salvas. Devolve (senhas, avisos)."""
+    firefox_roots, chromium_bases = _layout(home, windows)
+    opened = open_files()
+    out: list[Password] = []
+    warnings: list[str] = []
+    for app, profile, pdir in _firefox_profiles(firefox_roots):
+        seen: set = set()
+        # sem logins.json, o Firefox restaura a cópia de segurança: as duas contam
+        for name in FIREFOX_LOGINS:
+            path = os.path.join(pdir, name)
+            if os.path.isfile(path):
+                _scan_firefox_logins(app, profile, path, opened, out, warnings, seen)
+    for app, profile, path in _chromium_files(chromium_bases, windows, LOGIN_FILES):
+        _scan_chromium_logins(app, profile, path, opened, out, warnings)
+    return out, warnings
+
+
+def scan_kind(kind: str, home: str | None = None) -> tuple[list, list[str]]:
+    """Cookies ou senhas salvas, conforme kind."""
+    return scan_passwords(home) if kind == PASSWORDS else scan(home)
+
+
 # --------------------------------------------------------------------------- eliminação
 
+DELETE_SQL = {
+    "firefox_db": "delete from moz_cookies where id=? and host is ? and name is ?",
+    "chromium_db": "delete from cookies where rowid=? and host_key is ? and name is ?",
+    "chromium_logins":
+        "delete from logins where rowid=? and origin_url is ? and username_value is ?",
+}
+
+
 def _delete_sqlite(path: str, fmt: str, keys: list[tuple]) -> int:
-    if fmt == "firefox_db":
-        sql = "delete from moz_cookies where id=? and host is ? and name is ?"
-    else:
-        sql = "delete from cookies where rowid=? and host_key is ? and name is ?"
     conn = sqlite3.connect(path, timeout=3)
     try:
+        # zera no arquivo o que sai, em vez de só marcar o espaço como livre
         conn.execute("pragma secure_delete=on").fetchall()
+        children = []
+        if fmt == "chromium_logins":
+            # tabelas presas a uma senha pelo id dela: avisos de senha vazada e anotações
+            for table in ("insecure_credentials", "password_notes"):
+                if "parent_id" in {r[1] for r in conn.execute(f"pragma table_info({table})")}:
+                    children.append(table)
         removed = 0
         for key in keys:
-            removed += conn.execute(sql, key).rowcount
+            gone = conn.execute(DELETE_SQL[fmt], key).rowcount
+            if gone:
+                for table in children:
+                    conn.execute(f"delete from {table} where parent_id=?", (key[0],))
+            removed += gone
         conn.commit()
         try:
             conn.execute("pragma wal_checkpoint(truncate)").fetchall()
@@ -549,27 +729,60 @@ def _delete_session(path: str, keys: list[tuple]) -> int:
     return len(removed_keys)
 
 
-def delete(cookies: list[Cookie]) -> dict:
-    """Elimina os cookies dados. Pula os arquivos de aplicativos abertos.
+def _drop_firefox_logins(path: str, targets: set) -> int:
+    """Tira de um logins.json (ou da cópia) as senhas de targets. Devolve quantas saíram."""
+    with open(path, encoding="utf-8") as fh:
+        data = json.load(fh)
+    logins = data.get("logins") if isinstance(data, dict) else None
+    if not isinstance(logins, list):
+        return 0
+    keep = [login for login in logins
+            if not (isinstance(login, dict) and _firefox_login_key(login) in targets)]
+    removed = len(logins) - len(keep)
+    if removed:
+        data["logins"] = keep
+        alerts = data.get("dismissedBreachAlertsByLoginGUID")
+        if isinstance(alerts, dict):                  # avisos de vazamento dessas senhas
+            for guid, _id, _host in targets:
+                alerts.pop(guid, None)
+        _overwrite(path, json.dumps(data, ensure_ascii=False,
+                                    separators=(",", ":")).encode("utf-8"))
+    return removed
+
+
+def _delete_firefox_logins(path: str, keys: list[tuple]) -> int:
+    targets = set(keys)
+    removed = _drop_firefox_logins(path, targets)
+    for name in FIREFOX_LOGINS:          # a outra cópia (logins.json ou o backup) também
+        other = os.path.join(os.path.dirname(path), name)
+        if os.path.basename(path) != name and os.path.isfile(other):
+            _drop_firefox_logins(other, targets)
+    return removed
+
+
+def delete(items: list) -> dict:
+    """Elimina os cookies ou as senhas dados. Pula os arquivos de aplicativos abertos.
     Devolve {"deleted": int, "skipped": Counter(app -> n), "errors": [str]}."""
     opened = open_files()
-    groups: dict[tuple[str, str], list[Cookie]] = defaultdict(list)
-    for ck in cookies:
-        groups[(ck.source, ck.fmt)].append(ck)
+    groups: dict[tuple[str, str], list] = defaultdict(list)
+    for item in items:
+        groups[(item.source, item.fmt)].append(item)
     result = {"deleted": 0, "skipped": Counter(), "errors": []}
-    for (source, fmt), items in groups.items():
-        app = items[0].app
+    for (source, fmt), group in groups.items():
+        app = group[0].app
         if _in_use(source, fmt, opened):
-            result["skipped"][app] += len(items)
+            result["skipped"][app] += len(group)
             continue
-        keys = [c.key for c in items]
+        keys = [item.key for item in group]
         try:
             if fmt == "firefox_session":
                 result["deleted"] += _delete_session(source, keys)
+            elif fmt == "firefox_logins":
+                result["deleted"] += _delete_firefox_logins(source, keys)
             else:
                 result["deleted"] += _delete_sqlite(source, fmt, keys)
         except (sqlite3.Error, OSError, ValueError, IndexError) as exc:
-            result["errors"].append(f"{app} ({items[0].profile}): {exc}")
+            result["errors"].append(f"{app} ({group[0].profile}): {exc}")
     return result
 
 
@@ -586,15 +799,22 @@ def print_summary(home: str | None) -> None:
         for (a, profile, store, kind), n in sorted(by.items()):
             if a == app:
                 print(f"   perfil {profile} | {store} | {kind}: {fmt_num(n)}")
-    for w in warnings:
+    passwords, more = scan_passwords(home)
+    places = Counter((p.app, p.profile) for p in passwords)
+    print(f"\n{fmt_num(len(passwords))} senha(s) salva(s) em "
+          f"{len({p.app for p in passwords})} aplicativo(s)")
+    for (app, profile), n in sorted(places.items()):
+        print(f"   {app}, perfil {profile}: {fmt_num(n)}")
+    for w in warnings + more:
         print("aviso:", w)
 
 
 # --------------------------------------------------------------------------- limpeza automática
 #
-# Uma regra diz QUAIS sites limpar (lista vazia = todos) e QUANDO. As regras ficam em
-# regras.json; quem dispara é o próprio sistema (autostart e systemd no Linux, registro e
-# Agendador de Tarefas no Windows), chamando este programa com --automatico GATILHO.
+# Uma regra diz QUAIS sites limpar (lista vazia = todos), O QUE limpar (cookies, senhas
+# salvas ou os dois) e QUANDO. As regras ficam em regras.json; quem dispara é o próprio
+# sistema (autostart e systemd no Linux, registro e Agendador de Tarefas no Windows),
+# chamando este programa com --automatico GATILHO.
 
 WHEN_LOGIN, WHEN_TIME, WHEN_SHUTDOWN = "inicio", "horario", "desligar"
 WHEN_LABELS = [
@@ -603,6 +823,12 @@ WHEN_LABELS = [
     # o Windows não deixa um programa comum rodar durante o desligamento
     (WHEN_SHUTDOWN, "Ao desligar o computador (limpa no início seguinte)" if WINDOWS
      else "Ao desligar o computador"),
+]
+# o que limpar; regras antigas, sem essa escolha, limpam só cookies
+WHAT_LABELS = [
+    ((COOKIES, PASSWORDS), "Cookies e senhas"),
+    ((COOKIES,), "Só cookies"),
+    ((PASSWORDS,), "Só senhas"),
 ]
 
 
@@ -670,7 +896,8 @@ def site_matches(host: str, sites: list[str]) -> bool:
     return not sites or any(host == site or host.endswith("." + site) for site in sites)
 
 
-def new_rule(sites_text: str, when: str, time_text: str) -> tuple[dict | None, str]:
+def new_rule(sites_text: str, when: str, time_text: str,
+             what: tuple = (COOKIES,)) -> tuple[dict | None, str]:
     """(regra, "") ou (None, o que está errado)."""
     hour = ""
     if when == WHEN_TIME:
@@ -678,11 +905,15 @@ def new_rule(sites_text: str, when: str, time_text: str) -> tuple[dict | None, s
         if not hour:
             return None, "Escreva o horário como HH:MM, por exemplo 08:30."
     return {"id": os.urandom(4).hex(), "sites": parse_sites(sites_text), "quando": when,
-            "hora": hour, "ativa": True}, ""
+            "hora": hour, "limpar": list(what), "ativa": True}, ""
 
 
 def rule_sites_text(rule: dict) -> str:
     return ", ".join(rule["sites"]) or "Todos os sites"
+
+
+def rule_what_text(rule: dict) -> str:
+    return dict(WHAT_LABELS)[tuple(rule["limpar"])]
 
 
 def rule_when_text(rule: dict) -> str:
@@ -707,9 +938,12 @@ def load_rules(home: str | None = None) -> list[dict]:
         hour = valid_time(str(raw.get("hora", ""))) or ""
         if raw["quando"] == WHEN_TIME and not hour:
             continue
+        what = raw.get("limpar") if isinstance(raw.get("limpar"), list) else []
         rules.append({"id": str(raw.get("id") or os.urandom(4).hex()),
                       "sites": parse_sites(" ".join(map(str, raw.get("sites") or []))),
                       "quando": raw["quando"], "hora": hour,
+                      "limpar": [kind for kind in (COOKIES, PASSWORDS) if kind in what]
+                      or [COOKIES],
                       "ativa": bool(raw.get("ativa", True))})
     return rules
 
@@ -739,7 +973,7 @@ def _shutting_down() -> bool:
 
 def run_rules(trigger: str, home: str | None = None) -> int:
     """Executa as regras ativas de um gatilho: inicio, desligar ou horario:HH:MM.
-    Devolve quantos cookies eliminou."""
+    Devolve quantos cookies e senhas eliminou, somados."""
     when, _, hour = trigger.partition(":")
     wanted = {when}
     if WINDOWS and when == WHEN_LOGIN:
@@ -752,30 +986,35 @@ def run_rules(trigger: str, home: str | None = None) -> int:
         return 0
     # ao desligar, os navegadores ainda podem estar fechando: insiste por alguns segundos
     tries = 8 if when == WHEN_SHUTDOWN else 1
-    deleted: Counter = Counter()
+    deleted = {COOKIES: Counter(), PASSWORDS: Counter()}
     skipped: dict[str, int] = {}
     for attempt in range(tries):
         for rule in rules:
-            cookies, _warnings = scan(home)       # relê a cada regra: eliminar muda os bancos
-            outcome = delete([c for c in cookies if site_matches(c.host, rule["sites"])])
-            deleted[rule["id"]] += outcome["deleted"]
-            skipped[rule["id"]] = sum(outcome["skipped"].values())
+            skipped[rule["id"]] = 0
+            for kind in rule["limpar"]:
+                # relê a cada regra: eliminar muda os arquivos
+                found, _warnings = scan_kind(kind, home)
+                outcome = delete([item for item in found
+                                  if site_matches(item.host, rule["sites"])])
+                deleted[kind][rule["id"]] += outcome["deleted"]
+                skipped[rule["id"]] += sum(outcome["skipped"].values())
         if not any(skipped.values()) or attempt + 1 == tries:
             break
         time.sleep(1.5)
     runs = last_runs(home)
     stamp = time.strftime("%d/%m/%Y %H:%M")
     for rule in rules:
-        text = f"{stamp}: {deleted_text(deleted[rule['id']])}"
+        text = f"{stamp}: " + ", ".join(deleted_text(deleted[kind][rule["id"]], kind)
+                                        for kind in rule["limpar"])
         if skipped[rule["id"]]:
-            text += f", {fmt_num(skipped[rule['id']])} pulados (aplicativo aberto)"
+            text += f"; {fmt_num(skipped[rule['id']])} pulados (aplicativo aberto)"
         runs[rule["id"]] = text
     known = {rule["id"] for rule in load_rules(home)}
     _write_text(os.path.join(config_dir(home), "execucoes.json"),
                 json.dumps({k: v for k, v in runs.items() if k in known},
                            ensure_ascii=False, indent=2) + "\n")
-    record_cleanup(sum(deleted.values()), home)
-    return sum(deleted.values())
+    record_cleanup(sum(deleted[COOKIES].values()), home)
+    return sum(sum(counts.values()) for counts in deleted.values())
 
 
 # ---- agendamento no sistema
@@ -1034,7 +1273,7 @@ def stats_view(stats: dict, now: float | None = None) -> dict:
 
 # --------------------------------------------------------------------------- configurações
 #
-# config.json guarda as escolhas da aba Configurações. "Iniciar com o sistema" abre a
+# config.json guarda as escolhas da aba Ajustes. "Iniciar com o sistema" abre a
 # janela no início da sessão: arquivo em ~/.config/autostart no Linux, valor Run do
 # registro do usuário no Windows.
 
@@ -1108,7 +1347,46 @@ COLUMNS = [
     ("Expira", "expires", "expires_sort", 100),
     ("Guardado em", "store", "store", 170),
 ]
+PASSWORD_COLUMNS = [
+    ("Aplicativo", "app", "app", 170),
+    ("Perfil", "profile", "profile", 150),
+    ("Site", "host", "host", 0),
+    ("Usuário", "user", "user", 220),
+    ("Salva em", "created", "created_sort", 110),
+    ("Último uso", "last_used", "last_used_sort", 110),
+]
+LIST_COLUMNS = {COOKIES: COLUMNS, PASSWORDS: PASSWORD_COLUMNS}
 ALL_APPS = "Todos os aplicativos"
+
+# os textos que mudam entre a aba Cookies e a aba Senhas
+KIND_TEXTS = {
+    COOKIES: {
+        "one": "cookie", "many": "cookies", "done": "eliminado",
+        "scan": "Verificar cookies", "delete": "Eliminar cookies",
+        "idle": "Clique em Verificar cookies para listar o que está guardado nesta conta.",
+        "hint": "Filtrar por site, cookie ou tipo",
+        "busy": "Verificando os cookies guardados…",
+        "empty": "Nenhum cookie guardado",
+        "empty_note": "Nenhum cookie guardado em disco foi encontrado.",
+        "picked": "selecionado(s): Eliminar remove só esses.",
+        "all": "Todos os cookies encontrados.",
+        "effect": "Você será desconectado dos sites correspondentes nesses aplicativos.",
+    },
+    PASSWORDS: {
+        "one": "senha", "many": "senhas", "done": "eliminada",
+        "scan": "Verificar senhas", "delete": "Eliminar senhas",
+        "idle": "Clique em Verificar senhas para listar os sites com senha salva nesta conta.",
+        "hint": "Filtrar por site ou usuário",
+        "busy": "Verificando as senhas salvas…",
+        "empty": "Nenhuma senha salva",
+        "empty_note": "Nenhuma senha salva foi encontrada.",
+        "picked": "selecionada(s): Eliminar remove só essas.",
+        "all": "Todas as senhas encontradas.",
+        "effect": "Nesses sites, será preciso digitar a senha de novo. Se o navegador "
+                  "sincroniza senhas com uma conta (Google, Microsoft, Firefox), apague-as "
+                  "lá também, senão elas voltam.",
+    },
+}
 
 # Cores do tema escuro do Claude, usadas pela janela GTK e pela janela Tk.
 THEME = {
@@ -1132,72 +1410,102 @@ THEME = {
 }
 
 
-def app_label(cookie: Cookie) -> str:
-    return cookie.app + (" · aberto" if cookie.in_use else "")
+def app_label(item) -> str:
+    return item.app + (" · aberto" if item.in_use else "")
 
 
-def search_text(cookie: Cookie) -> str:
-    """Texto em minúsculas onde o filtro procura."""
-    return " ".join((cookie.app, cookie.profile, cookie.host, cookie.name,
-                     cookie.kind, cookie.store)).lower()
+def search_text(item) -> str:
+    """Texto em minúsculas onde o filtro procura (de um cookie ou de uma senha)."""
+    if isinstance(item, Password):
+        return " ".join((item.app, item.profile, item.host, item.user)).lower()
+    return " ".join((item.app, item.profile, item.host, item.name,
+                     item.kind, item.store)).lower()
 
 
-def scan_safely(home: str | None) -> tuple[list[Cookie], list[str]]:
+def row_values(item, kind: str) -> list[str]:
+    """O que cada coluna da lista mostra."""
+    return [app_label(item) if prop == "app" else getattr(item, prop) or "—"
+            for _title, prop, _sort, _width in LIST_COLUMNS[kind]]
+
+
+def scan_safely(home: str | None, kind: str = COOKIES) -> tuple[list, list[str]]:
     try:
-        return scan(home)
+        return scan_kind(kind, home)
     except Exception as exc:                  # nunca deixar a janela presa
         return [], [f"Falha na verificação: {exc}"]
 
 
-def delete_safely(cookies: list[Cookie], home: str | None) -> dict:
-    """Elimina e anota nas estatísticas."""
+def delete_safely(items: list, home: str | None, kind: str = COOKIES) -> dict:
+    """Elimina e, se forem cookies, anota nas estatísticas."""
     try:
-        outcome = delete(cookies)
+        outcome = delete(items)
     except Exception as exc:
         return {"deleted": 0, "skipped": Counter(), "errors": [str(exc)]}
-    record_cleanup(outcome["deleted"], home)
+    if kind == COOKIES:
+        record_cleanup(outcome["deleted"], home)
     return outcome
 
 
-TABS = [("inicio", "Início"), ("cookies", "Cookies"), ("config", "Configurações")]
+TABS = [("inicio", "Início"), (COOKIES, "Cookies"), (PASSWORDS, "Senhas"),
+        ("config", "Ajustes")]
 IDLE_TITLE = "Nenhuma verificação ainda"
-IDLE_TEXT = "Clique em Verificar cookies para listar o que está guardado nesta conta."
+
+# página inicial: o texto, os cartões (título, texto, linha de estado; a do cartão das
+# regras é o resumo delas) e a nota de rodapé
+START_TEXT = ("Veja e elimine os cookies e as senhas que navegadores e aplicativos"
+              "\nguardaram nesta conta.")
+START_CARDS = [
+    ("Verificar cookies", "Lista tudo o que está guardado, por aplicativo e por site.",
+     "Nada é eliminado sem você confirmar"),
+    ("Senhas salvas", "Lista os sites com senha guardada nos navegadores e apaga.",
+     "A senha nunca é lida nem mostrada"),
+    ("Limpeza automática", "Cookies e senhas: a cada sessão, num horário ou ao desligar.",
+     ""),
+]
+START_NOTE = "O valor dos cookies e as senhas nunca são lidos nem mostrados."
+RULES_TEXT = ("Elimina sozinho os cookies e as senhas salvas dos sites escolhidos. "
+              "Aplicativos abertos na hora são pulados.")
 
 
-def footer_text(total: int, shown: int, picked: int, in_session: int) -> str:
-    text = f"Mostrando {fmt_num(shown)} de {fmt_num(total)} cookies."
+def footer_text(total: int, shown: int, picked: int, in_session: int,
+                kind: str = COOKIES) -> str:
+    words = KIND_TEXTS[kind]
+    text = f"Mostrando {fmt_num(shown)} de {fmt_num(total)} {words['many']}."
     if in_session:
         text += f" {fmt_num(in_session)} em arquivos de restauração de sessão."
     if picked:
-        text += f" {fmt_num(picked)} selecionado(s): Eliminar remove só esses."
+        text += f" {fmt_num(picked)} {words['picked']}"
     else:
         text += " Sem seleção, Eliminar remove tudo o que está na lista."
     return text
 
 
-def delete_question(targets: list[Cookie], picked: bool, total: int) -> tuple[str, str]:
+def delete_question(targets: list, picked: bool, total: int,
+                    kind: str = COOKIES) -> tuple[str, str]:
     """(título, texto) da confirmação antes de eliminar."""
+    words = KIND_TEXTS[kind]
     n = len(targets)
     if picked:
         scope = "Só o que está selecionado."
     elif n == total:
-        scope = "Todos os cookies encontrados."
+        scope = words["all"]
     else:
         scope = "Tudo o que está na lista filtrada."
     counts = Counter(c.app for c in targets)
     lines = [f"{app}: {fmt_num(k)}" for app, k in sorted(counts.items())]
     busy_apps = sorted({c.app for c in targets if c.in_use})
     body = scope + "\n\n" + "\n".join(lines)
-    body += ("\n\nIsso não pode ser desfeito. Você será desconectado dos sites "
-             "correspondentes nesses aplicativos.")
+    body += "\n\nIsso não pode ser desfeito. " + words["effect"]
     if busy_apps:
         body += ("\n\nAbertos agora, serão pulados: " + ", ".join(busy_apps)
                  + ". Feche-os e repita para limpá-los.")
-    return f"Eliminar {fmt_num(n)} cookie{'s' if n != 1 else ''}?", body
+    return f"Eliminar {fmt_num(n)} {words['one'] if n == 1 else words['many']}?", body
 
 
-def deleted_text(n: int) -> str:
-    return f"{fmt_num(n)} cookie{'s' if n != 1 else ''} eliminado{'s' if n != 1 else ''}"
+def deleted_text(n: int, kind: str = COOKIES) -> str:
+    words = KIND_TEXTS[kind]
+    plural = "s" if n != 1 else ""
+    return f"{fmt_num(n)} {words['one'] if n == 1 else words['many']} {words['done']}{plural}"
 
 
 def delete_notes(outcome: dict) -> str:
@@ -1206,7 +1514,7 @@ def delete_notes(outcome: dict) -> str:
     if outcome["skipped"]:
         parts = ", ".join(f"{app} ({fmt_num(k)})"
                           for app, k in sorted(outcome["skipped"].items()))
-        notes.append("Não eliminados porque o aplicativo está aberto: " + parts
+        notes.append("Pulados porque o aplicativo está aberto: " + parts
                      + ".\nFeche o aplicativo e clique em Eliminar de novo.")
     if outcome["errors"]:
         notes.append("Erros:\n" + "\n".join(outcome["errors"]))
@@ -1291,6 +1599,8 @@ def run_gui(home: str | None, minimized: bool = False) -> int:
     Gtk.Window.set_default_icon_name(APP_ID)
 
     class Row(GObject.Object):
+        """Uma linha da lista: os campos de um cookie ou de uma senha que as colunas
+        mostram ou usam para ordenar."""
         app = GObject.Property(type=str, default="")
         profile = GObject.Property(type=str, default="")
         host = GObject.Property(type=str, default="")
@@ -1299,33 +1609,176 @@ def run_gui(home: str | None, minimized: bool = False) -> int:
         expires = GObject.Property(type=str, default="")
         expires_sort = GObject.Property(type=str, default="")
         store = GObject.Property(type=str, default="")
+        user = GObject.Property(type=str, default="")
+        created = GObject.Property(type=str, default="")
+        created_sort = GObject.Property(type=str, default="")
+        last_used = GObject.Property(type=str, default="")
+        last_used_sort = GObject.Property(type=str, default="")
 
-        def __init__(self, cookie: Cookie):
-            super().__init__(app=app_label(cookie),
-                             profile=cookie.profile, host=cookie.host, name=cookie.name,
-                             kind=cookie.kind, expires=cookie.expires,
-                             expires_sort=cookie.expires_sort, store=cookie.store)
-            self.cookie = cookie
-            self.hay = search_text(cookie)
+        def __init__(self, item, kind):
+            props = {}
+            for (_title, prop, sort_prop, _width), shown in zip(LIST_COLUMNS[kind],
+                                                                row_values(item, kind)):
+                props[prop] = shown
+                if sort_prop != prop:
+                    props[sort_prop] = getattr(item, sort_prop)
+            super().__init__(**props)
+            self.item = item
+            self.hay = search_text(item)
+
+    def make_column(title, prop, sort_prop, width, expand):
+        factory = Gtk.SignalListItemFactory()
+
+        def setup(_factory, item):
+            item.set_child(Gtk.Label(xalign=0, ellipsize=Pango.EllipsizeMode.END))
+
+        def bind(_factory, item):
+            item.get_child().set_text(item.get_item().get_property(prop))
+
+        factory.connect("setup", setup)
+        factory.connect("bind", bind)
+        column = Gtk.ColumnViewColumn(title=title, factory=factory,
+                                      resizable=True, expand=expand)
+        if width:
+            column.set_fixed_width(width)
+        column.set_sorter(Gtk.StringSorter.new(
+            Gtk.PropertyExpression.new(Row, None, sort_prop)))
+        return column
+
+    class ListTab:
+        """Uma aba com lista, de cookies ou de senhas: uma página por situação (sem
+        verificação, trabalhando, vazia, lista), o filtro e a seleção."""
+
+        def __init__(self, win, kind):
+            self.win, self.kind = win, kind
+            self.words = KIND_TEXTS[kind]
+            self.items: list = []
+            self.app_choices: list[str | None] = [None]
+            self.app_selected: str | None = None
+            self.needle = ""
+            self.updating_dropdown = False
+            self.status = "Pronto."                # o rodapé enquanto não há lista na tela
+
+            self.store = Gio.ListStore(item_type=Row)
+            self.filter = Gtk.CustomFilter.new(self._match, None)
+            self.filtered = Gtk.FilterListModel(model=self.store, filter=self.filter)
+            self.view = Gtk.ColumnView(show_row_separators=True, reorderable=False)
+            for title, prop, sort_prop, width in LIST_COLUMNS[kind]:
+                self.view.append_column(make_column(title, prop, sort_prop, width, not width))
+            self.sorted = Gtk.SortListModel(model=self.filtered, sorter=self.view.get_sorter())
+            self.selection = Gtk.MultiSelection(model=self.sorted)
+            self.selection.connect("selection-changed", lambda *_: win._update_footer())
+            self.view.set_model(self.selection)
+            scroller = Gtk.ScrolledWindow(vexpand=True, hexpand=True, child=self.view)
+
+            self.dropdown = Gtk.DropDown.new_from_strings([ALL_APPS])
+            self.dropdown.connect("notify::selected", self.on_app_changed)
+            self.search = Gtk.SearchEntry(hexpand=True, placeholder_text=self.words["hint"])
+            self.search.connect("search-changed", self.on_search)
+            bar = Gtk.Box(spacing=8, margin_top=8, margin_bottom=8, margin_start=10, margin_end=10)
+            bar.append(self.dropdown)
+            bar.append(self.search)
+            page_list = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+            page_list.append(bar)
+            page_list.append(Gtk.Separator())
+            page_list.append(scroller)
+
+            scan_now = Gtk.Button(label=self.words["scan"], halign=Gtk.Align.CENTER)
+            scan_now.add_css_class("pill")
+            scan_now.add_css_class("suggested-action")
+            scan_now.connect("clicked", lambda *_: win.scan(kind))
+            page_idle = Adw.StatusPage(icon_name="edit-find-symbolic", title=IDLE_TITLE,
+                                       description=self.words["idle"], child=scan_now)
+            spinner = Gtk.Spinner(spinning=True, width_request=32, height_request=32,
+                                  halign=Gtk.Align.CENTER)
+            page_busy = Adw.StatusPage(title="Trabalhando…", child=spinner)
+            page_empty = Adw.StatusPage(icon_name="emblem-ok-symbolic",
+                                        title=self.words["empty"])
+            self.stack = Gtk.Stack()
+            for name, page in (("idle", page_idle), ("busy", page_busy),
+                               ("empty", page_empty), ("list", page_list)):
+                self.stack.add_named(page, name)
+
+        def show(self, name):
+            self.stack.set_visible_child_name(name)
+
+        def fill(self, items):
+            self.items = items
+            self.store.remove_all()
+            self.store.splice(0, 0, [Row(item, self.kind) for item in items])
+            counts = Counter(item.app for item in items)
+            self.app_choices = [None] + sorted(counts)
+            labels = [ALL_APPS] + [
+                f"{app} ({fmt_num(counts[app])})" for app in self.app_choices[1:]]
+            keep = self.app_selected if self.app_selected in counts else None
+            self.updating_dropdown = True
+            self.dropdown.set_model(Gtk.StringList.new(labels))
+            self.dropdown.set_selected(self.app_choices.index(keep))
+            self.updating_dropdown = False
+            self.app_selected = keep
+            self.filter.changed(Gtk.FilterChange.DIFFERENT)
+            if items:
+                self.show("list")
+            else:
+                self.show("empty")
+                self.status = self.words["empty_note"]
+
+        def footer(self):
+            if self.stack.get_visible_child_name() != "list":
+                return self.status
+            picked = self.selection.get_selection().get_size()
+            sess = sum(1 for item in self.items
+                       if getattr(item, "store", "") == STORE_SESSION)
+            return footer_text(len(self.items), self.shown(), picked, sess, self.kind)
+
+        # ---- filtro
+        def _match(self, row, *_):
+            if self.app_selected and row.item.app != self.app_selected:
+                return False
+            return not self.needle or self.needle in row.hay
+
+        def _refilter(self):
+            self.filter.changed(Gtk.FilterChange.DIFFERENT)
+            self.win._update_footer()
+
+        def on_search(self, entry):
+            self.needle = entry.get_text().strip().lower()
+            self._refilter()
+
+        def on_app_changed(self, dropdown, _pspec):
+            if self.updating_dropdown:
+                return
+            idx = dropdown.get_selected()
+            self.app_selected = self.app_choices[idx] if idx < len(self.app_choices) else None
+            self._refilter()
+
+        # ---- seleção
+        def shown(self):
+            return self.sorted.get_n_items()
+
+        def selected_rows(self):
+            bits = self.selection.get_selection()
+            return [self.selection.get_item(bits.get_nth(i)) for i in range(bits.get_size())]
+
+        def visible_rows(self):
+            return [self.sorted.get_item(i) for i in range(self.shown())]
 
     class Window(Adw.ApplicationWindow):
         def __init__(self, app):
             super().__init__(application=app, title=APP_NAME,
                              default_width=1200, default_height=680)
-            self.cookies: list[Cookie] = []
-            self.app_choices: list[str | None] = [None]
-            self.app_selected: str | None = None
-            self.needle = ""
             self.busy = False
-            self.updating_dropdown = False
             self.rules = load_rules(home)
             self.settings = load_settings(home)
             sync_autostart(self.settings, home)   # o programa pode ter mudado de pasta
 
-            self.btn_scan = Gtk.Button(label="Verificar cookies")
+            # os botões do cabeçalho falam da aba Senhas quando ela está aberta e dos
+            # cookies no resto do tempo (self.kind)
+            self.kind = COOKIES
+            self.btn_scan = Gtk.Button(label=KIND_TEXTS[COOKIES]["scan"])
             self.btn_scan.add_css_class("suggested-action")
-            self.btn_scan.connect("clicked", self.on_scan)
-            self.btn_delete = Gtk.Button(label="Eliminar cookies", sensitive=False)
+            self.btn_scan.connect("clicked", lambda *_: self.scan(self.kind))
+            self.btn_delete = Gtk.Button(label=KIND_TEXTS[COOKIES]["delete"], sensitive=False)
             self.btn_delete.add_css_class("eliminar")
             self.btn_delete.connect("clicked", self.on_delete)
             btn_rules = Gtk.Button(icon_name="alarm-symbolic",
@@ -1336,54 +1789,11 @@ def run_gui(home: str | None, minimized: bool = False) -> int:
             header.pack_start(btn_rules)
             header.pack_end(self.btn_delete)
 
-            # lista
-            self.store = Gio.ListStore(item_type=Row)
-            self.filter = Gtk.CustomFilter.new(self._match, None)
-            self.filtered = Gtk.FilterListModel(model=self.store, filter=self.filter)
-            self.view = Gtk.ColumnView(show_row_separators=True, reorderable=False)
-            for title, prop, sort_prop, width in COLUMNS:
-                self.view.append_column(self._column(title, prop, sort_prop, width, not width))
-            self.sorted = Gtk.SortListModel(model=self.filtered, sorter=self.view.get_sorter())
-            self.selection = Gtk.MultiSelection(model=self.sorted)
-            self.selection.connect("selection-changed", lambda *_: self._update_footer())
-            self.view.set_model(self.selection)
-            scroller = Gtk.ScrolledWindow(vexpand=True, hexpand=True, child=self.view)
-
-            self.dropdown = Gtk.DropDown.new_from_strings([ALL_APPS])
-            self.dropdown.connect("notify::selected", self.on_app_changed)
-            self.search = Gtk.SearchEntry(hexpand=True,
-                                          placeholder_text="Filtrar por site, cookie ou tipo")
-            self.search.connect("search-changed", self.on_search)
-            bar = Gtk.Box(spacing=8, margin_top=8, margin_bottom=8, margin_start=10, margin_end=10)
-            bar.append(self.dropdown)
-            bar.append(self.search)
-            page_list = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-            page_list.append(bar)
-            page_list.append(Gtk.Separator())
-            page_list.append(scroller)
-
-            scan_now = Gtk.Button(label="Verificar cookies", halign=Gtk.Align.CENTER)
-            scan_now.add_css_class("pill")
-            scan_now.add_css_class("suggested-action")
-            scan_now.connect("clicked", self.on_scan)
-            page_idle = Adw.StatusPage(icon_name="edit-find-symbolic", title=IDLE_TITLE,
-                                       description=IDLE_TEXT, child=scan_now)
-            spinner = Gtk.Spinner(spinning=True, width_request=32, height_request=32,
-                                  halign=Gtk.Align.CENTER)
-            page_busy = Adw.StatusPage(title="Trabalhando…", child=spinner)
-            self.page_empty = Adw.StatusPage(icon_name="emblem-ok-symbolic",
-                                             title="Nenhum cookie guardado")
-
-            # aba Cookies: uma página por situação
-            self.stack = Gtk.Stack()
-            self.stack.add_named(page_idle, "idle")
-            self.stack.add_named(page_busy, "busy")
-            self.stack.add_named(self.page_empty, "empty")
-            self.stack.add_named(page_list, "list")
-
+            self.lists = {kind: ListTab(self, kind) for kind in (COOKIES, PASSWORDS)}
             self.tabs = Adw.ViewStack(vexpand=True)
             pages = {"inicio": (self._start_page(), "go-home-symbolic"),
-                     "cookies": (self.stack, "view-list-symbolic"),
+                     COOKIES: (self.lists[COOKIES].stack, "view-list-symbolic"),
+                     PASSWORDS: (self.lists[PASSWORDS].stack, "dialog-password-symbolic"),
                      "config": (self._settings_page(), "emblem-system-symbolic")}
             for key, title in TABS:
                 self.tabs.add_titled_with_icon(pages[key][0], key, title, pages[key][1])
@@ -1408,8 +1818,13 @@ def run_gui(home: str | None, minimized: bool = False) -> int:
             self._refresh_stats()
 
         def _on_tab(self, *_):
-            if self.tabs.get_visible_child_name() == "inicio":
+            name = self.tabs.get_visible_child_name()
+            if name == "inicio":
                 self._refresh_stats()             # limpezas automáticas contam também
+            self.kind = name if name in self.lists else COOKIES
+            self.btn_scan.set_label(KIND_TEXTS[self.kind]["scan"])
+            self.btn_delete.set_label(KIND_TEXTS[self.kind]["delete"])
+            self._update_footer()
 
         # ---- página inicial
         def _card(self, icon_name, title, text, state, handler, primary=False):
@@ -1499,23 +1914,20 @@ def run_gui(home: str | None, minimized: bool = False) -> int:
         def _start_page(self):
             title = Gtk.Label(label=APP_NAME, margin_top=6)
             title.add_css_class("inicio-titulo")
-            text = Gtk.Label(justify=Gtk.Justification.CENTER,
-                             label="Veja e elimine os cookies que navegadores e aplicativos"
-                                   "\nguardaram nesta conta.")
+            text = Gtk.Label(justify=Gtk.Justification.CENTER, label=START_TEXT)
             text.add_css_class("inicio-texto")
-            scan_card, _state = self._card(
-                "edit-find-symbolic", "Verificar cookies",
-                "Lista tudo o que está guardado, por aplicativo e por site.",
-                "Nada é eliminado sem você confirmar", self.on_scan, primary=True)
-            rules_card, self.rules_state = self._card(
-                "alarm-symbolic", "Limpeza automática",
-                "Programe: a cada sessão, num horário ou ao desligar, por site.",
-                rules_summary(self.rules), self.on_rules)
             cards = Gtk.Box(spacing=14, homogeneous=True, margin_top=6)
-            cards.append(scan_card)
-            cards.append(rules_card)
-            note = Gtk.Label(label="O valor dos cookies nunca é lido nem mostrado.",
-                             margin_top=18)
+            for index, (icon_name, (title_text, body, state)) in enumerate(zip(
+                    ("edit-find-symbolic", "dialog-password-symbolic", "alarm-symbolic"),
+                    START_CARDS)):
+                handler = (lambda *_: self.scan(COOKIES), lambda *_: self.scan(PASSWORDS),
+                           self.on_rules)[index]
+                card, status = self._card(icon_name, title_text, body,
+                                          state or rules_summary(self.rules), handler,
+                                          primary=index == 0)
+                cards.append(card)
+            self.rules_state = status             # o último cartão é o das regras
+            note = Gtk.Label(label=START_NOTE, margin_top=18)
             note.add_css_class("inicio-nota")
             column = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8,
                              valign=Gtk.Align.CENTER, margin_top=24, margin_bottom=24,
@@ -1524,7 +1936,7 @@ def run_gui(home: str | None, minimized: bool = False) -> int:
                 column.append(widget)
             page = Gtk.Box()
             page.add_css_class("inicio")
-            page.append(Adw.Clamp(maximum_size=660, child=column, hexpand=True))
+            page.append(Adw.Clamp(maximum_size=780, child=column, hexpand=True))
             return page
 
         # ---- configurações
@@ -1560,6 +1972,8 @@ def run_gui(home: str | None, minimized: bool = False) -> int:
         def _show_rules(self):
             when_keys = [key for key, _label in WHEN_LABELS]
             sites = Adw.EntryRow(title="Sites, separados por vírgula (vazio = todos)")
+            what = Adw.ComboRow(title="O que limpar", model=Gtk.StringList.new(
+                [label for _kinds, label in WHAT_LABELS]))
             when = Adw.ComboRow(title="Quando", model=Gtk.StringList.new(
                 [label for _key, label in WHEN_LABELS]))
             hour = Adw.EntryRow(title="Horário (HH:MM)", text="08:00", visible=False)
@@ -1567,11 +1981,8 @@ def run_gui(home: str | None, minimized: bool = False) -> int:
                 when_keys[when.get_selected()] == WHEN_TIME))
             add = Gtk.Button(label="Adicionar regra", halign=Gtk.Align.END, margin_top=12)
             add.add_css_class("suggested-action")
-            form = Adw.PreferencesGroup(
-                title="Nova regra",
-                description="Elimina sozinho os cookies dos sites escolhidos. "
-                            "Aplicativos abertos na hora são pulados.")
-            for widget in (sites, when, hour, add):
+            form = Adw.PreferencesGroup(title="Nova regra", description=RULES_TEXT)
+            for widget in (sites, what, when, hour, add):
                 form.add(widget)
             listing = Adw.PreferencesGroup(title="Regras")
             page = Adw.PreferencesPage()
@@ -1592,7 +2003,7 @@ def run_gui(home: str | None, minimized: bool = False) -> int:
                 rows.clear()
                 runs = last_runs(home)
                 for rule in self.rules:
-                    detail = rule_when_text(rule)
+                    detail = f"{rule_what_text(rule)} · {rule_when_text(rule)}"
                     if rule["id"] in runs:
                         detail += "\nÚltima limpeza em " + runs[rule["id"]]
                     row = Adw.ActionRow(title=GLib.markup_escape_text(rule_sites_text(rule)),
@@ -1625,7 +2036,7 @@ def run_gui(home: str | None, minimized: bool = False) -> int:
 
             def on_add(*_):
                 rule, error = new_rule(sites.get_text(), when_keys[when.get_selected()],
-                                       hour.get_text())
+                                       hour.get_text(), WHAT_LABELS[what.get_selected()][0])
                 if rule is None:
                     toasts.add_toast(Adw.Toast(title=error))
                     return
@@ -1643,116 +2054,50 @@ def run_gui(home: str | None, minimized: bool = False) -> int:
             dialog.present(self)
             return False
 
-        # ---- montagem das colunas
-        def _column(self, title, prop, sort_prop, width, expand):
-            factory = Gtk.SignalListItemFactory()
-
-            def setup(_factory, item):
-                item.set_child(Gtk.Label(xalign=0, ellipsize=Pango.EllipsizeMode.END))
-
-            def bind(_factory, item):
-                item.get_child().set_text(item.get_item().get_property(prop))
-
-            factory.connect("setup", setup)
-            factory.connect("bind", bind)
-            column = Gtk.ColumnViewColumn(title=title, factory=factory,
-                                          resizable=True, expand=expand)
-            if width:
-                column.set_fixed_width(width)
-            column.set_sorter(Gtk.StringSorter.new(
-                Gtk.PropertyExpression.new(Row, None, sort_prop)))
-            return column
-
-        # ---- filtro
-        def _match(self, row, *_):
-            if self.app_selected and row.cookie.app != self.app_selected:
-                return False
-            return not self.needle or self.needle in row.hay
-
-        def _refilter(self):
-            self.filter.changed(Gtk.FilterChange.DIFFERENT)
-            self._update_footer()
-
-        def on_search(self, entry):
-            self.needle = entry.get_text().strip().lower()
-            self._refilter()
-
-        def on_app_changed(self, dropdown, _pspec):
-            if self.updating_dropdown:
-                return
-            idx = dropdown.get_selected()
-            self.app_selected = self.app_choices[idx] if idx < len(self.app_choices) else None
-            self._refilter()
-
-        # ---- seleção
-        def _selected_rows(self):
-            bits = self.selection.get_selection()
-            return [self.selection.get_item(bits.get_nth(i)) for i in range(bits.get_size())]
-
-        def _visible_rows(self):
-            return [self.sorted.get_item(i) for i in range(self.sorted.get_n_items())]
-
+        # ---- rodapé
         def _update_footer(self):
-            if not self.cookies:
-                return
-            shown = self.sorted.get_n_items()
-            picked = self.selection.get_selection().get_size()
-            sess = sum(1 for c in self.cookies if c.store == STORE_SESSION)
-            self.footer.set_text(footer_text(len(self.cookies), shown, picked, sess))
-            self.btn_delete.set_sensitive(not self.busy and shown > 0)
+            current = self.lists[self.kind]
+            self.footer.set_text(current.footer())
+            self.btn_delete.set_sensitive(
+                not self.busy and current.stack.get_visible_child_name() == "list"
+                and current.shown() > 0)
 
         # ---- verificar
-        def _set_busy(self, busy):
+        def _set_busy(self, busy, kind, text=""):
             self.busy = busy
             self.btn_scan.set_sensitive(not busy)
             self.btn_delete.set_sensitive(False)
             if busy:
-                self.stack.set_visible_child_name("busy")
-                self.tabs.set_visible_child_name("cookies")
+                current = self.lists[kind]
+                current.status = text
+                current.show("busy")
+                self.tabs.set_visible_child_name(kind)
+                self._update_footer()
 
         # Os cliques só agendam o trabalho: mexer na tela (trocar de página, abrir diálogo)
         # dentro do próprio "clicked" deixa o GTK com o botão preso como "pressionado".
-        def on_scan(self, *_):
-            GLib.idle_add(self._start_scan)
+        def scan(self, kind):
+            GLib.idle_add(self._start_scan, kind)
 
         def on_delete(self, *_):
             GLib.idle_add(self._ask_delete)
 
-        def _start_scan(self):
+        def _start_scan(self, kind):
             if self.busy:
                 return False
-            self._set_busy(True)
-            self.footer.set_text("Verificando os cookies guardados…")
+            self._set_busy(True, kind, KIND_TEXTS[kind]["busy"])
 
             def work():
-                GLib.idle_add(self._scan_done, scan_safely(home))
+                GLib.idle_add(self._scan_done, kind, scan_safely(home, kind))
 
             threading.Thread(target=work, daemon=True).start()
             return False
 
-        def _scan_done(self, result):
-            cookies, warnings = result
-            self.cookies = cookies
-            self.store.remove_all()
-            self.store.splice(0, 0, [Row(c) for c in cookies])
-            counts = Counter(c.app for c in cookies)
-            self.app_choices = [None] + sorted(counts)
-            labels = [ALL_APPS] + [
-                f"{app} ({fmt_num(counts[app])})" for app in self.app_choices[1:]]
-            keep = self.app_selected if self.app_selected in counts else None
-            self.updating_dropdown = True
-            self.dropdown.set_model(Gtk.StringList.new(labels))
-            self.dropdown.set_selected(self.app_choices.index(keep))
-            self.updating_dropdown = False
-            self.app_selected = keep
-            self._set_busy(False)
-            self.filter.changed(Gtk.FilterChange.DIFFERENT)
-            if cookies:
-                self.stack.set_visible_child_name("list")
-                self._update_footer()
-            else:
-                self.stack.set_visible_child_name("empty")
-                self.footer.set_text("Nenhum cookie guardado em disco foi encontrado.")
+        def _scan_done(self, kind, result):
+            items, warnings = result
+            self._set_busy(False, kind)
+            self.lists[kind].fill(items)
+            self._update_footer()
             if warnings:
                 self._alert("Alguns locais não puderam ser lidos", "\n".join(warnings))
             return False
@@ -1761,44 +2106,44 @@ def run_gui(home: str | None, minimized: bool = False) -> int:
         def _ask_delete(self):
             if self.busy:
                 return False
-            picked = self._selected_rows()
-            rows = picked or self._visible_rows()
+            kind, current = self.kind, self.lists[self.kind]
+            picked = current.selected_rows()
+            rows = picked or current.visible_rows()
             if not rows:
                 return False
-            targets = [r.cookie for r in rows]
-            self.tabs.set_visible_child_name("cookies")   # a lista de que a pergunta fala
-            heading, body = delete_question(targets, bool(picked), len(self.cookies))
+            targets = [r.item for r in rows]
+            self.tabs.set_visible_child_name(kind)    # a lista de que a pergunta fala
+            heading, body = delete_question(targets, bool(picked), len(current.items), kind)
             dialog = Adw.AlertDialog(heading=heading, body=body)
             dialog.add_response("cancel", "Cancelar")
             dialog.add_response("delete", "Eliminar")
             dialog.set_response_appearance("delete", Adw.ResponseAppearance.DESTRUCTIVE)
             dialog.set_default_response("cancel")
             dialog.set_close_response("cancel")
-            dialog.connect("response", self._delete_answer, targets)
+            dialog.connect("response", self._delete_answer, kind, targets)
             dialog.present(self)
             return False
 
-        def _delete_answer(self, _dialog, response, targets):
+        def _delete_answer(self, _dialog, response, kind, targets):
             if response == "delete":
-                GLib.idle_add(self._start_delete, targets)
+                GLib.idle_add(self._start_delete, kind, targets)
 
-        def _start_delete(self, targets):
+        def _start_delete(self, kind, targets):
             if self.busy:
                 return False
-            self._set_busy(True)
-            self.footer.set_text("Eliminando…")
+            self._set_busy(True, kind, "Eliminando…")
 
             def work():
-                outcome = delete_safely(targets, home)
-                GLib.idle_add(self._delete_done, outcome, scan_safely(home))
+                outcome = delete_safely(targets, home, kind)
+                GLib.idle_add(self._delete_done, kind, outcome, scan_safely(home, kind))
 
             threading.Thread(target=work, daemon=True).start()
             return False
 
-        def _delete_done(self, outcome, result):
-            self._scan_done(result)
+        def _delete_done(self, kind, outcome, result):
+            self._scan_done(kind, result)
             self._refresh_stats()
-            self.toasts.add_toast(Adw.Toast(title=deleted_text(outcome["deleted"])))
+            self.toasts.add_toast(Adw.Toast(title=deleted_text(outcome["deleted"], kind)))
             notes = delete_notes(outcome)
             if notes:
                 self._alert("Nem tudo foi eliminado", notes)
@@ -1988,25 +2333,171 @@ def run_gui_tk(home: str | None, minimized: bool = False) -> int:
     style.configure("Horizontal.TProgressbar", background=T["accent"], troughcolor=T["surface"],
                     bordercolor=T["surface"], lightcolor=T["accent"], darkcolor=T["accent"])
 
-    class App:
-        def __init__(self):
-            self.cookies: list[Cookie] = []
-            self.hay: list[str] = []           # texto de busca de cada cookie
+    def centered(page):
+        box = ttk.Frame(page)
+        box.place(relx=0.5, rely=0.45, anchor="center")
+        return box
+
+    class ListTab:
+        """Uma aba com lista, de cookies ou de senhas: as páginas sem verificação, vazia e
+        com a lista (a de "trabalhando" é da janela), o filtro, a ordenação e a seleção."""
+
+        def __init__(self, app, kind, body):
+            self.app, self.kind = app, kind
+            self.words = KIND_TEXTS[kind]
+            self.columns = LIST_COLUMNS[kind]
+            self.items: list = []
+            self.hay: list[str] = []           # texto de busca de cada item
             self.visible: list[str] = []       # linhas mostradas, em ordem; o id é a posição
             self.app_choices: list[str | None] = [None]
             self.app_selected: str | None = None
             self.needle = ""
             self.sort_col: str | None = None
             self.sort_desc = False
-            self.busy = False
             self.note = ""                     # resultado da última eliminação, vai no rodapé
+            self.status = "Pronto."            # o rodapé enquanto não há lista na tela
             self.search_job = None
+            self.page = "idle"                 # idle, busy, empty ou list
+            self.pages = {}
+            for name in ("idle", "empty", "list"):
+                self.pages[name] = ttk.Frame(body)
+                self.pages[name].grid(row=0, column=0, sticky="nsew")
+
+            box = centered(self.pages["idle"])
+            ttk.Label(box, text=IDLE_TITLE, style="Title.TLabel").pack()
+            ttk.Label(box, text=self.words["idle"], style="Dim.TLabel").pack(
+                pady=(px(6), px(18)))
+            ttk.Button(box, text=self.words["scan"], style="Accent.TButton",
+                       command=lambda: app.start_scan(kind)).pack()
+            ttk.Label(centered(self.pages["empty"]), text=self.words["empty"],
+                      style="Title.TLabel").pack()
+
+            page = self.pages["list"]
+            bar = ttk.Frame(page, padding=(px(10), px(8)))
+            bar.pack(fill="x")
+            self.combo = ttk.Combobox(bar, state="readonly", values=[ALL_APPS], width=30)
+            self.combo.current(0)
+            self.combo.pack(side="left")
+            self.combo.bind("<<ComboboxSelected>>", self.on_app)
+            self.search_var = tk.StringVar()
+            self.search = ttk.Entry(bar, textvariable=self.search_var)
+            self.search.pack(side="left", fill="x", expand=True, padx=(px(8), 0))
+            # dica dentro do campo, visível enquanto ele está vazio
+            self.hint = tk.Label(self.search, text=self.words["hint"], bd=0,
+                                 bg=T["surface"], fg=T["fg_muted"], font=base, cursor="xterm")
+            self.hint.place(x=px(9), rely=0.5, anchor="w")
+            self.hint.bind("<Button-1>", lambda _event: self.search.focus_set())
+            self.search_var.trace_add("write", self.on_search)
+            line(page).pack(fill="x")
+
+            table = ttk.Frame(page)
+            table.pack(fill="both", expand=True)
+            self.tree = ttk.Treeview(table, columns=[col for _t, col, _s, _w in self.columns],
+                                     show="headings", selectmode="extended")
+            for title, col, _sort, width in self.columns:
+                self.tree.heading(col, text=title, anchor="w",
+                                  command=lambda c=col: self.sort_by(c))
+                self.tree.column(col, width=px(width or 300), minwidth=px(70),
+                                 stretch=not width, anchor="w")
+            scroll = ttk.Scrollbar(table, orient="vertical", command=self.tree.yview)
+            self.tree.configure(yscrollcommand=scroll.set)
+            scroll.pack(side="right", fill="y")
+            self.tree.pack(side="left", fill="both", expand=True)
+            self.tree.bind("<<TreeviewSelect>>", lambda _event: app.update_footer())
+            for key in ("<Control-a>", "<Control-A>"):
+                self.tree.bind(key, lambda _event: self.tree.selection_set(self.visible))
+            self.tree.bind("<Escape>", lambda _event: self.tree.selection_set(()))
+
+        def frame(self):
+            """A página desta aba que deve ficar à mostra."""
+            return self.app.pages["busy"] if self.page == "busy" else self.pages[self.page]
+
+        def fill(self, items):
+            self.tree.delete(*(str(i) for i in range(len(self.items))))
+            self.items = items
+            self.hay = [search_text(item) for item in items]
+            for i, item in enumerate(items):
+                self.tree.insert("", "end", iid=str(i), values=row_values(item, self.kind))
+            counts = Counter(item.app for item in items)
+            self.app_choices = [None] + sorted(counts)
+            if self.app_selected not in counts:
+                self.app_selected = None
+            self.combo.configure(values=[ALL_APPS] + [
+                f"{app} ({fmt_num(counts[app])})" for app in self.app_choices[1:]])
+            self.combo.current(self.app_choices.index(self.app_selected))
+            self.refilter()
+            if items:
+                self.page = "list"
+            else:
+                self.page = "empty"
+                self.status = f"{self.note} {self.words['empty_note']}".strip()
+
+        def footer(self):
+            if self.page != "list":
+                return self.status
+            sess = sum(1 for item in self.items
+                       if getattr(item, "store", "") == STORE_SESSION)
+            text = footer_text(len(self.items), len(self.visible), len(self.picked()), sess,
+                               self.kind)
+            return f"{self.note} {text}".strip()
+
+        # ---- filtro e ordenação
+        def refilter(self):
+            app, needle = self.app_selected, self.needle
+            rows = [i for i, item in enumerate(self.items)
+                    if (not app or item.app == app) and (not needle or needle in self.hay[i])]
+            if self.sort_col:
+                attr = next(sort for _t, col, sort, _w in self.columns if col == self.sort_col)
+                rows.sort(key=lambda i: getattr(self.items[i], attr).casefold(),
+                          reverse=self.sort_desc)
+            self.visible = [str(i) for i in rows]
+            keep = self.picked()
+            self.tree.set_children("", *self.visible)
+            self.tree.selection_set(keep)
+            self.app.update_footer()
+
+        def picked(self):
+            shown = set(self.visible)
+            return [iid for iid in self.tree.selection() if iid in shown]
+
+        def sort_by(self, col):
+            self.sort_desc = self.sort_col == col and not self.sort_desc
+            self.sort_col = col
+            for title, other, _sort, _width in self.columns:
+                arrow = ("  ▼" if self.sort_desc else "  ▲") if other == col else ""
+                self.tree.heading(other, text=title + arrow)
+            self.refilter()
+
+        def on_search(self, *_):
+            if self.search_var.get():
+                self.hint.place_forget()
+            else:
+                self.hint.place(x=px(9), rely=0.5, anchor="w")
+            if self.search_job:
+                root.after_cancel(self.search_job)
+            self.search_job = root.after(150, self.apply_search)
+
+        def apply_search(self):
+            self.search_job = None
+            self.needle = self.search_var.get().strip().lower()
+            self.refilter()
+
+        def on_app(self, _event):
+            self.app_selected = self.app_choices[self.combo.current()]
+            self.combo.selection_clear()
+            self.refilter()
+
+    class App:
+        def __init__(self):
+            self.busy = False
             self.rules = load_rules(home)
             self.rules_window = None
             self.settings = load_settings(home)
             sync_autostart(self.settings, home)    # o programa pode ter mudado de pasta
             self.tab = "inicio"
-            self.cookie_page = "idle"              # página da aba Cookies
+            # os botões do cabeçalho falam da aba Senhas quando ela está aberta e dos
+            # cookies no resto do tempo
+            self.kind = COOKIES
             self.bar_tips: list[str] = []
             self.results: queue.Queue = queue.Queue()
             self._build()
@@ -2025,14 +2516,15 @@ def run_gui_tk(home: str | None, minimized: bool = False) -> int:
                 label.bind("<Enter>", lambda _event, k=key: self.paint_tab(k, True))
                 label.bind("<Leave>", lambda _event, k=key: self.paint_tab(k, False))
                 self.tab_labels[key] = label
-            self.btn_delete = ttk.Button(header, text="Eliminar cookies", style="Danger.TButton",
-                                         command=self.ask_delete)
+            self.btn_delete = ttk.Button(header, text=KIND_TEXTS[COOKIES]["delete"],
+                                         style="Danger.TButton", command=self.ask_delete)
             self.btn_delete.state(["disabled"])
             self.btn_delete.pack(side="right")
             ttk.Button(header, text="Limpeza automática",
                        command=self.show_rules).pack(side="right", padx=(0, px(8)))
-            self.btn_scan = ttk.Button(header, text="Verificar cookies", style="Accent.TButton",
-                                       command=self.start_scan)
+            self.btn_scan = ttk.Button(header, text=KIND_TEXTS[COOKIES]["scan"],
+                                       style="Accent.TButton",
+                                       command=lambda: self.start_scan(self.kind))
             self.btn_scan.pack(side="right", padx=(0, px(8)))
             line(root).pack(fill="x")
 
@@ -2049,97 +2541,50 @@ def run_gui_tk(home: str | None, minimized: bool = False) -> int:
             body.rowconfigure(0, weight=1)
             body.columnconfigure(0, weight=1)
             self.pages = {}
-            for name in ("start", "idle", "busy", "empty", "list", "config"):
+            for name in ("start", "busy", "config"):
                 self.pages[name] = ttk.Frame(body)
                 self.pages[name].grid(row=0, column=0, sticky="nsew")
 
-            def centered(page):
-                box = ttk.Frame(self.pages[page])
-                box.place(relx=0.5, rely=0.45, anchor="center")
-                return box
-
-            box = centered("start")
+            box = centered(self.pages["start"])
             ttk.Label(box, text=APP_NAME, style="Hero.TLabel").pack()
             ttk.Label(box, style="Dim.TLabel", justify="center",
-                      text="Veja e elimine os cookies que navegadores e aplicativos\n"
-                           "guardaram nesta conta.").pack(pady=(px(6), px(22)))
+                      text=START_TEXT).pack(pady=(px(6), px(22)))
             self.monitor(box).pack(fill="x", pady=(0, px(14)))
             cards = ttk.Frame(box)
             cards.pack()
-            card, _state = self.card(
-                cards, "Verificar cookies",
-                "Lista tudo o que está guardado, por aplicativo e por site.",
-                "Nada é eliminado sem você confirmar", self.start_scan, primary=True)
-            card.grid(row=0, column=0, sticky="nsew", padx=(0, px(14)))
-            card, self.rules_state = self.card(
-                cards, "Limpeza automática",
-                "Programe: a cada sessão, num horário ou ao desligar, por site.",
-                rules_summary(self.rules), self.show_rules)
-            card.grid(row=0, column=1, sticky="nsew")
-            ttk.Label(box, text="O valor dos cookies nunca é lido nem mostrado.",
-                      style="Muted.TLabel").pack(pady=(px(18), 0))
-            box = centered("idle")
-            ttk.Label(box, text=IDLE_TITLE, style="Title.TLabel").pack()
-            ttk.Label(box, text=IDLE_TEXT, style="Dim.TLabel").pack(pady=(px(6), px(18)))
-            ttk.Button(box, text="Verificar cookies", style="Accent.TButton",
-                       command=self.start_scan).pack()
-            box = centered("busy")
+            commands = (lambda: self.start_scan(COOKIES), lambda: self.start_scan(PASSWORDS),
+                        self.show_rules)
+            for index, ((title, text, state), command) in enumerate(zip(START_CARDS,
+                                                                        commands)):
+                card, self.rules_state = self.card(cards, title, text,
+                                                   state or rules_summary(self.rules),
+                                                   command, primary=index == 0)
+                card.grid(row=0, column=index, sticky="nsew",
+                          padx=(0, px(14) if index < len(START_CARDS) - 1 else 0))
+            # self.rules_state ficou com o último cartão, o das regras
+            ttk.Label(box, text=START_NOTE, style="Muted.TLabel").pack(pady=(px(18), 0))
+            box = centered(self.pages["busy"])
             ttk.Label(box, text="Trabalhando…", style="Title.TLabel").pack(pady=(0, px(16)))
             self.progress = ttk.Progressbar(box, mode="indeterminate", length=px(220))
             self.progress.pack()
-            ttk.Label(centered("empty"), text="Nenhum cookie guardado",
-                      style="Title.TLabel").pack()
 
-            page = self.pages["list"]
-            bar = ttk.Frame(page, padding=(px(10), px(8)))
-            bar.pack(fill="x")
-            self.combo = ttk.Combobox(bar, state="readonly", values=[ALL_APPS], width=30)
-            self.combo.current(0)
-            self.combo.pack(side="left")
-            self.combo.bind("<<ComboboxSelected>>", self.on_app)
-            self.search_var = tk.StringVar()
-            self.search = ttk.Entry(bar, textvariable=self.search_var)
-            self.search.pack(side="left", fill="x", expand=True, padx=(px(8), 0))
-            # dica dentro do campo, visível enquanto ele está vazio
-            self.hint = tk.Label(self.search, text="Filtrar por site, cookie ou tipo", bd=0,
-                                 bg=T["surface"], fg=T["fg_muted"], font=base, cursor="xterm")
-            self.hint.place(x=px(9), rely=0.5, anchor="w")
-            self.hint.bind("<Button-1>", lambda _event: self.search.focus_set())
-            self.search_var.trace_add("write", self.on_search)
-            line(page).pack(fill="x")
-
-            table = ttk.Frame(page)
-            table.pack(fill="both", expand=True)
-            self.tree = ttk.Treeview(table, columns=[col for _t, col, _s, _w in COLUMNS],
-                                     show="headings", selectmode="extended")
-            for title, col, _sort, width in COLUMNS:
-                self.tree.heading(col, text=title, anchor="w",
-                                  command=lambda c=col: self.sort_by(c))
-                self.tree.column(col, width=px(width or 300), minwidth=px(70),
-                                 stretch=not width, anchor="w")
-            scroll = ttk.Scrollbar(table, orient="vertical", command=self.tree.yview)
-            self.tree.configure(yscrollcommand=scroll.set)
-            scroll.pack(side="right", fill="y")
-            self.tree.pack(side="left", fill="both", expand=True)
-            self.tree.bind("<<TreeviewSelect>>", lambda _event: self.update_footer())
-            for key in ("<Control-a>", "<Control-A>"):
-                self.tree.bind(key, lambda _event: self.tree.selection_set(self.visible))
-            self.tree.bind("<Escape>", lambda _event: self.tree.selection_set(()))
+            self.lists = {kind: ListTab(self, kind, body) for kind in (COOKIES, PASSWORDS)}
             self.build_settings()
             self.select_tab("inicio")
 
         # ---- abas
-        def show(self, name):
-            """Mostra uma das páginas da aba Cookies: idle, busy, empty ou list."""
-            self.cookie_page = name
-            self.select_tab("cookies")
-
         def select_tab(self, tab):
             self.tab = tab
             if tab == "inicio":
                 self.refresh_stats()               # limpezas automáticas contam também
-            self.pages[{"inicio": "start", "cookies": self.cookie_page,
-                        "config": "config"}[tab]].tkraise()
+            if tab in self.lists:
+                self.lists[tab].frame().tkraise()
+            else:
+                self.pages["start" if tab == "inicio" else "config"].tkraise()
+            self.kind = tab if tab in self.lists else COOKIES
+            self.btn_scan.configure(text=KIND_TEXTS[self.kind]["scan"])
+            self.btn_delete.configure(text=KIND_TEXTS[self.kind]["delete"])
+            self.update_footer()
             for key in self.tab_labels:
                 self.paint_tab(key, False)
 
@@ -2210,7 +2655,7 @@ def run_gui_tk(home: str | None, minimized: bool = False) -> int:
         def build_settings(self):
             box = ttk.Frame(self.pages["config"], padding=(px(24), px(26)))
             box.place(relx=0.5, y=0, anchor="n", width=px(640))
-            ttk.Label(box, text="Configurações", style="Title.TLabel").pack(anchor="w")
+            ttk.Label(box, text="Ajustes", style="Title.TLabel").pack(anchor="w")
             ttk.Label(box, text="Inicialização", style="Dim.TLabel", font=bold).pack(
                 anchor="w", pady=(px(18), px(8)))
             card = tk.Frame(box, bg=T["surface"], padx=px(18), pady=px(4),
@@ -2276,7 +2721,7 @@ def run_gui_tk(home: str | None, minimized: bool = False) -> int:
                              highlightthickness=1, highlightbackground=edge)
             look = dict(bg=T["surface"], anchor="w", justify="left", cursor="hand2")
             parts = [tk.Label(frame, text=title, fg=T["fg"], font=bold, **look),
-                     tk.Label(frame, text=text, fg=T["fg_dim"], font=base, wraplength=px(250),
+                     tk.Label(frame, text=text, fg=T["fg_dim"], font=base, wraplength=px(210),
                               **look),
                      tk.Label(frame, text=state, fg=T["accent"], font=small_bold, **look)]
             for part, gap in zip(parts, (0, px(6), px(10))):
@@ -2307,10 +2752,8 @@ def run_gui_tk(home: str | None, minimized: bool = False) -> int:
             box = ttk.Frame(top, padding=(px(22), px(18)))
             box.pack(fill="both", expand=True)
             ttk.Label(box, text="Limpeza automática", style="Title.TLabel").pack(anchor="w")
-            ttk.Label(box, style="Dim.TLabel",
-                      text="Elimina sozinho os cookies dos sites escolhidos. "
-                           "Aplicativos abertos na hora são pulados."
-                      ).pack(anchor="w", pady=(px(4), px(16)))
+            ttk.Label(box, style="Dim.TLabel", text=RULES_TEXT).pack(
+                anchor="w", pady=(px(4), px(16)))
 
             form = ttk.Frame(box)
             form.pack(fill="x")
@@ -2321,16 +2764,22 @@ def run_gui_tk(home: str | None, minimized: bool = False) -> int:
             ttk.Label(form, text="Separados por vírgula. Vazio = todos os sites.",
                       style="Muted.TLabel").grid(row=1, column=1, columnspan=3, sticky="w",
                                                  pady=(px(3), px(10)))
-            ttk.Label(form, text="Quando").grid(row=2, column=0, sticky="w", padx=(0, px(12)))
+            ttk.Label(form, text="O que").grid(row=2, column=0, sticky="w", padx=(0, px(12)))
+            what = ttk.Combobox(form, state="readonly", width=46,
+                                values=[label for _kinds, label in WHAT_LABELS])
+            what.current(0)
+            what.grid(row=2, column=1, sticky="w", pady=(0, px(10)))
+            what.bind("<<ComboboxSelected>>", lambda _event: what.selection_clear())
+            ttk.Label(form, text="Quando").grid(row=3, column=0, sticky="w", padx=(0, px(12)))
             when = ttk.Combobox(form, state="readonly", width=46,
                                 values=[label for _key, label in WHEN_LABELS])
             when.current(0)
-            when.grid(row=2, column=1, sticky="w")
+            when.grid(row=3, column=1, sticky="w")
             hour_label = ttk.Label(form, text="às")
             hour = ttk.Entry(form, width=7)
             hour.insert(0, "08:00")
-            hour_label.grid(row=2, column=2, padx=px(8))
-            hour.grid(row=2, column=3, sticky="w")
+            hour_label.grid(row=3, column=2, padx=px(8))
+            hour.grid(row=3, column=3, sticky="w")
 
             def on_when(_event=None):
                 when.selection_clear()
@@ -2343,12 +2792,13 @@ def run_gui_tk(home: str | None, minimized: bool = False) -> int:
             when.bind("<<ComboboxSelected>>", on_when)
             on_when()
             message = ttk.Label(form, style="Error.TLabel", wraplength=px(420), justify="left")
-            message.grid(row=3, column=0, columnspan=3, sticky="w", pady=(px(12), 0))
+            message.grid(row=4, column=0, columnspan=3, sticky="w", pady=(px(12), 0))
             add = ttk.Button(form, text="Adicionar regra", style="Accent.TButton")
-            add.grid(row=3, column=3, sticky="e", pady=(px(12), 0))
+            add.grid(row=4, column=3, sticky="e", pady=(px(12), 0))
 
-            columns = (("sites", "Sites", 230), ("quando", "Quando", 230),
-                       ("estado", "Situação", 100), ("ultima", "Última limpeza", 280))
+            columns = (("sites", "Sites", 190), ("limpar", "O que", 170),
+                       ("quando", "Quando", 210), ("estado", "Situação", 90),
+                       ("ultima", "Última limpeza", 300))
             tree = ttk.Treeview(box, columns=[col for col, _t, _w in columns],
                                 show="headings", selectmode="browse", height=7)
             for col, title, width in columns:
@@ -2368,7 +2818,7 @@ def run_gui_tk(home: str | None, minimized: bool = False) -> int:
                 runs = last_runs(home)
                 for rule in self.rules:
                     tree.insert("", "end", iid=rule["id"], values=(
-                        rule_sites_text(rule), rule_when_text(rule),
+                        rule_sites_text(rule), rule_what_text(rule), rule_when_text(rule),
                         "Ativa" if rule["ativa"] else "Desativada",
                         runs.get(rule["id"], "ainda não rodou")))
                 if select and tree.exists(select):
@@ -2387,7 +2837,8 @@ def run_gui_tk(home: str | None, minimized: bool = False) -> int:
                 return next(rule for rule in self.rules if rule["id"] == picked[0])
 
             def on_add(_event=None):
-                rule, error = new_rule(sites.get(), when_keys[when.current()], hour.get())
+                rule, error = new_rule(sites.get(), when_keys[when.current()], hour.get(),
+                                       WHAT_LABELS[what.current()][0])
                 if rule is None:
                     message.configure(text=error)
                     return
@@ -2478,103 +2929,39 @@ def run_gui_tk(home: str | None, minimized: bool = False) -> int:
                 pass
             root.after(60, self._poll)
 
-        def set_busy(self, busy, text=""):
+        def set_busy(self, busy, kind, text=""):
             self.busy = busy
             self.btn_scan.state(["disabled" if busy else "!disabled"])
             self.btn_delete.state(["disabled"])
             if busy:
-                self.footer.configure(text=text)
+                current = self.lists[kind]
+                current.status = text
+                current.page = "busy"
                 self.progress.start(12)
-                self.show("busy")
+                self.select_tab(kind)
             else:
                 self.progress.stop()
 
-        # ---- filtro e ordenação
-        def refilter(self):
-            app, needle = self.app_selected, self.needle
-            rows = [i for i, c in enumerate(self.cookies)
-                    if (not app or c.app == app) and (not needle or needle in self.hay[i])]
-            if self.sort_col:
-                attr = next(sort for _t, col, sort, _w in COLUMNS if col == self.sort_col)
-                rows.sort(key=lambda i: getattr(self.cookies[i], attr).casefold(),
-                          reverse=self.sort_desc)
-            self.visible = [str(i) for i in rows]
-            keep = self.picked()
-            self.tree.set_children("", *self.visible)
-            self.tree.selection_set(keep)
-            self.update_footer()
-
-        def picked(self):
-            shown = set(self.visible)
-            return [iid for iid in self.tree.selection() if iid in shown]
-
         def update_footer(self):
-            if not self.cookies:
-                return
-            sess = sum(1 for c in self.cookies if c.store == STORE_SESSION)
-            text = footer_text(len(self.cookies), len(self.visible), len(self.picked()), sess)
-            self.footer.configure(text=f"{self.note} {text}".strip())
-            self.btn_delete.state(["!disabled" if self.visible and not self.busy
-                                   else "disabled"])
-
-        def sort_by(self, col):
-            self.sort_desc = self.sort_col == col and not self.sort_desc
-            self.sort_col = col
-            for title, other, _sort, _width in COLUMNS:
-                arrow = ("  ▼" if self.sort_desc else "  ▲") if other == col else ""
-                self.tree.heading(other, text=title + arrow)
-            self.refilter()
-
-        def on_search(self, *_):
-            if self.search_var.get():
-                self.hint.place_forget()
-            else:
-                self.hint.place(x=px(9), rely=0.5, anchor="w")
-            if self.search_job:
-                root.after_cancel(self.search_job)
-            self.search_job = root.after(150, self.apply_search)
-
-        def apply_search(self):
-            self.search_job = None
-            self.needle = self.search_var.get().strip().lower()
-            self.refilter()
-
-        def on_app(self, _event):
-            self.app_selected = self.app_choices[self.combo.current()]
-            self.combo.selection_clear()
-            self.refilter()
+            current = self.lists[self.kind]
+            self.footer.configure(text=current.footer())
+            self.btn_delete.state(["!disabled" if current.page == "list" and current.visible
+                                   and not self.busy else "disabled"])
 
         # ---- verificar
-        def start_scan(self):
+        def start_scan(self, kind):
             if self.busy:
                 return
-            self.note = ""
-            self.set_busy(True, "Verificando os cookies guardados…")
-            self.work(lambda: (scan_safely(home),), self.scan_done)
+            self.lists[kind].note = ""
+            self.set_busy(True, kind, KIND_TEXTS[kind]["busy"])
+            self.work(lambda: (scan_safely(home, kind),),
+                      lambda result: self.scan_done(kind, result))
 
-        def scan_done(self, result):
-            cookies, warnings = result
-            self.tree.delete(*(str(i) for i in range(len(self.cookies))))
-            self.cookies = cookies
-            self.hay = [search_text(c) for c in cookies]
-            for i, c in enumerate(cookies):
-                self.tree.insert("", "end", iid=str(i), values=(
-                    app_label(c), c.profile, c.host, c.name, c.kind, c.expires, c.store))
-            counts = Counter(c.app for c in cookies)
-            self.app_choices = [None] + sorted(counts)
-            if self.app_selected not in counts:
-                self.app_selected = None
-            self.combo.configure(values=[ALL_APPS] + [
-                f"{app} ({fmt_num(counts[app])})" for app in self.app_choices[1:]])
-            self.combo.current(self.app_choices.index(self.app_selected))
-            self.set_busy(False)
-            self.refilter()
-            if cookies:
-                self.show("list")
-            else:
-                self.show("empty")
-                self.footer.configure(text=f"{self.note} Nenhum cookie guardado em disco "
-                                           "foi encontrado.".strip())
+        def scan_done(self, kind, result):
+            items, warnings = result
+            self.set_busy(False, kind)
+            self.lists[kind].fill(items)
+            self.select_tab(kind)
             if warnings:
                 self.dialog("Alguns locais não puderam ser lidos", "\n".join(warnings),
                             [("ok", "Entendi", "TButton")])
@@ -2583,27 +2970,29 @@ def run_gui_tk(home: str | None, minimized: bool = False) -> int:
         def ask_delete(self):
             if self.busy:
                 return
-            picked = self.picked()
-            rows = picked or self.visible
+            kind, current = self.kind, self.lists[self.kind]
+            picked = current.picked()
+            rows = picked or current.visible
             if not rows:
                 return
-            targets = [self.cookies[int(iid)] for iid in rows]
-            self.select_tab("cookies")             # a lista de que a pergunta fala
-            heading, body = delete_question(targets, bool(picked), len(self.cookies))
+            targets = [current.items[int(iid)] for iid in rows]
+            self.select_tab(kind)                  # a lista de que a pergunta fala
+            heading, body = delete_question(targets, bool(picked), len(current.items), kind)
             self.dialog(heading, body, [("cancel", "Cancelar", "TButton"),
                                         ("delete", "Eliminar", "Danger.TButton")],
-                        lambda response: response == "delete" and self.start_delete(targets))
+                        lambda response: response == "delete"
+                        and self.start_delete(kind, targets))
 
-        def start_delete(self, targets):
+        def start_delete(self, kind, targets):
             if self.busy:
                 return
-            self.set_busy(True, "Eliminando…")
-            self.work(lambda: (delete_safely(targets, home), scan_safely(home)),
-                      self.delete_done)
+            self.set_busy(True, kind, "Eliminando…")
+            self.work(lambda: (delete_safely(targets, home, kind), scan_safely(home, kind)),
+                      lambda outcome, result: self.delete_done(kind, outcome, result))
 
-        def delete_done(self, outcome, result):
-            self.note = deleted_text(outcome["deleted"]) + "."
-            self.scan_done(result)
+        def delete_done(self, kind, outcome, result):
+            self.lists[kind].note = deleted_text(outcome["deleted"], kind) + "."
+            self.scan_done(kind, result)
             notes = delete_notes(outcome)
             if notes:
                 self.dialog("Nem tudo foi eliminado", notes, [("ok", "Entendi", "TButton")])
