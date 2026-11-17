@@ -32,10 +32,17 @@ jobs:
 
       - name: Gerar o .deb
         run: |
+          # GdkPixbuf com leitor de SVG: sem eles o gerar_deb.sh pula os ícones PNG
+          sudo apt-get update -q
+          sudo apt-get install -y -q python3-gi gir1.2-gdkpixbuf-2.0 librsvg2-common
           ./gerar_deb.sh
           # Releases antigas geravam limpa-cookies_<versão>_all.deb: anexa com o nome fixo
           deb="$(ls dist/*.deb)"
           [ "$deb" = dist/limpa-cookies.deb ] || mv "$deb" dist/limpa-cookies.deb
+          if ! dpkg-deb -c dist/limpa-cookies.deb | grep -q '/48x48/apps/local.LimpaCookies.png$'; then
+            echo "::error::o .deb saiu sem os ícones PNG"
+            exit 1
+          fi
 
       - name: Conferir a versão
         run: |
@@ -47,9 +54,7 @@ jobs:
           fi
 
       - name: Instalar como um usuário faria
-        run: |
-          sudo apt-get update -q
-          sudo apt-get install -y ./dist/limpa-cookies.deb
+        run: sudo apt-get install -y ./dist/limpa-cookies.deb
 
       - name: Testar o programa instalado
         env:
