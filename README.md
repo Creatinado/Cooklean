@@ -2,11 +2,20 @@
   <img src="icone.svg" width="96" alt="Ícone do Cooklean: um biscoito mordido">
 </p>
 
-<h1 align="center">Cooklean</h1>
+<h1 align="center">Limpa Cookies</h1>
 
 <p align="center">
-  <b>Limpa Cookies</b> para Linux e Windows: veja e elimine os cookies e as senhas salvas
-  que navegadores e aplicativos guardaram na sua conta.
+  <i>projeto Cooklean</i><br>
+  Para Linux e Windows: veja e elimine os cookies e as senhas salvas que navegadores e
+  aplicativos guardaram na sua conta.
+</p>
+
+<p align="center">
+  <a href="https://github.com/Creatinado/Cooklean/releases/latest/download/limpa-cookies.deb"><b>⬇ Baixar para Linux</b></a>
+  &nbsp;&nbsp;·&nbsp;&nbsp;
+  <a href="https://github.com/Creatinado/Cooklean/releases/latest/download/LimpaCookies-Instalador.exe"><b>⬇ Baixar para Windows</b></a>
+  <br>
+  <sub>Como instalar: <a href="#linux-debian-ubuntu-e-derivados">Linux</a> · <a href="#windows-10-e-11">Windows</a></sub>
 </p>
 
 <p align="center">
@@ -18,54 +27,66 @@ computador: o programa não usa a internet. Ele só mostra de onde é cada cooki
 perfil, site, nome, tipo e validade) e cada senha salva (aplicativo, perfil, site, usuário
 e datas), e apaga o que você escolher.
 
-## O que ele faz
-
-| Função | Como funciona |
-| --- | --- |
-| **Verificar cookies** | Lista tudo o que está guardado em disco, por aplicativo, perfil e site. Dá para filtrar por aplicativo, buscar por texto e ordenar por qualquer coluna. |
-| **Eliminar cookies** | Apaga tudo, só o que está na lista filtrada ou só as linhas selecionadas. Sempre pede confirmação antes. |
-| **Senhas salvas** | Lista os sites com senha guardada nos navegadores e apaga as que você escolher, do mesmo jeito que os cookies. A senha em si nunca é lida nem decifrada. |
-| **Limpeza automática** | Regras que limpam sozinhas cookies, senhas salvas ou os dois: de todos os sites ou só de alguns, ao iniciar a sessão, todos os dias num horário ou ao desligar o computador. |
-| **Monitor de estatísticas** | Na tela inicial: quantos cookies foram eliminados na última sessão e nos últimos 7 dias, com um gráfico por dia. |
-| **Iniciar com o sistema** | Opção para o programa abrir sozinho quando você entra na sua conta, minimizado se quiser. |
-
-**Navegadores e aplicativos reconhecidos:** Firefox, LibreWolf, Zen, Waterfox, Thunderbird,
-Google Chrome, Chromium, Brave, Microsoft Edge, Vivaldi, Opera e aplicativos feitos com
-Electron (VS Code, Discord, Slack, Teams, Claude e outros). No Linux, também as versões
-snap e flatpak.
-
 ## Instalação
 
 ### Linux (Debian, Ubuntu e derivados)
 
-Baixe o arquivo `.deb` da [versão mais recente](../../releases/latest) e, na pasta onde
-ele ficou, rode:
+**Jeito mais rápido.** Abra o **Terminal** (procure "Terminal" no menu de aplicativos; no
+Ubuntu, <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>T</kbd> também abre), cole esta linha e aperte
+<kbd>Enter</kbd>:
 
 ```bash
-sudo apt install ./limpa-cookies_*_all.deb
+wget -nv -O /tmp/limpa-cookies.deb https://github.com/Creatinado/Cooklean/releases/latest/download/limpa-cookies.deb && sudo apt install /tmp/limpa-cookies.deb
 ```
 
-Depois é só procurar **Limpa Cookies** no menu de aplicativos, ou rodar `limpa-cookies`.
-Para remover: `sudo apt remove limpa-cookies`.
+- Para colar no Terminal, use <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>V</kbd> (o
+  <kbd>Ctrl</kbd>+<kbd>V</kbd> não funciona lá) ou clique com o botão direito e escolha
+  **Colar**.
+- Ele pede a **senha do seu usuário**: digite-a **no Terminal** e aperte <kbd>Enter</kbd>.
+  Nada aparece na tela enquanto você digita, nem asteriscos: é normal. Nunca mande a sua
+  senha para outra pessoa ou em um chat.
+- Se ele perguntar `Continuar? [S/n]`, aperte <kbd>Enter</kbd>.
+- Se aparecer `não está no arquivo sudoers` (acontece no Debian quando foi criada uma
+  senha para o root na instalação), rode isto e digite a **senha do root**:
+  ```bash
+  su -c "apt install /tmp/limpa-cookies.deb"
+  ```
 
-Outras formas, a partir do código (`git clone https://github.com/Creatinado/Cooklean.git`):
+**Sem terminal.** Baixe o [`limpa-cookies.deb`](https://github.com/Creatinado/Cooklean/releases/latest/download/limpa-cookies.deb)
+e dê dois cliques nele. Em muitos sistemas ele abre na loja de aplicativos (no GNOME, o
+app **Programas**), com um botão **Instalar**.
 
-- **Gerar o pacote você mesmo:** `./gerar_deb.sh` cria o `.deb` na pasta `dist`.
+Depois é só procurar **Limpa Cookies** no menu de aplicativos. Para **atualizar**, rode o
+mesmo comando de novo. Para **remover**: `sudo apt remove limpa-cookies`.
+
+<details>
+<summary>Outras formas, a partir do código</summary>
+
+Baixe o código com `git clone https://github.com/Creatinado/Cooklean.git` e, dentro da
+pasta `Cooklean`:
+
+- **Gerar o pacote você mesmo:** `./gerar_deb.sh` cria `dist/limpa-cookies.deb`; instale
+  com `sudo apt install ./dist/limpa-cookies.deb`.
 - **Sem senha de administrador:** `./instalar.sh` cria o atalho no menu só para o seu
   usuário (`./instalar.sh --remover` desfaz).
 - **Sem instalar:** `python3 limpa_cookies.py`.
 
+Se o `apt` terminar com uma nota dizendo que o arquivo "não pôde ser acessado pelo usuário
+'_apt'" (Permissão negada), pode ignorar: a instalação deu certo. A nota aparece quando o
+`.deb` está dentro da sua pasta pessoal.
+
+</details>
+
 Precisa de Python 3.9 ou mais novo com GTK 4 e libadwaita 1.5 (Debian 13, Ubuntu 24.04).
 Em sistemas mais antigos (Debian 12, Ubuntu 22.04) o programa abre uma janela mais
-simples, que usa o `python3-tk`.
+simples, que usa o `python3-tk`. O `apt` instala o que faltar.
 
 ### Windows 10 e 11
 
-Baixe um destes arquivos da [versão mais recente](../../releases/latest):
-
-- `LimpaCookies-<versão>-Instalador.exe`: instala o programa e cria o atalho no menu
-  Iniciar.
-- `LimpaCookies.exe`: o programa completo num arquivo só, sem instalar. Basta abrir.
+Baixe e abra o [**instalador**](https://github.com/Creatinado/Cooklean/releases/latest/download/LimpaCookies-Instalador.exe):
+ele instala o programa e cria o atalho no menu Iniciar. Se preferir não instalar, baixe o
+[`LimpaCookies.exe`](https://github.com/Creatinado/Cooklean/releases/latest/download/LimpaCookies.exe),
+o programa completo num arquivo só: basta abrir.
 
 Não precisa de Python nem de senha de administrador. Como o programa não tem assinatura
 digital, o Windows pode mostrar o aviso "O Windows protegeu o computador": clique em
@@ -82,6 +103,22 @@ O resultado fica na pasta `dist`. O instalador só é gerado se o
 [Inno Setup 6](https://jrsoftware.org/isdl.php) estiver instalado.
 
 </details>
+
+## O que ele faz
+
+| Função | Como funciona |
+| --- | --- |
+| **Verificar cookies** | Lista tudo o que está guardado em disco, por aplicativo, perfil e site. Dá para filtrar por aplicativo, buscar por texto e ordenar por qualquer coluna. |
+| **Eliminar cookies** | Apaga tudo, só o que está na lista filtrada ou só as linhas selecionadas. Sempre pede confirmação antes. |
+| **Senhas salvas** | Lista os sites com senha guardada nos navegadores e apaga as que você escolher, do mesmo jeito que os cookies. A senha em si nunca é lida nem decifrada. |
+| **Limpeza automática** | Regras que limpam sozinhas cookies, senhas salvas ou os dois: de todos os sites ou só de alguns, ao iniciar a sessão, todos os dias num horário ou ao desligar o computador. |
+| **Monitor de estatísticas** | Na tela inicial: quantos cookies foram eliminados na última sessão e nos últimos 7 dias, com um gráfico por dia. |
+| **Iniciar com o sistema** | Opção para o programa abrir sozinho quando você entra na sua conta, minimizado se quiser. |
+
+**Navegadores e aplicativos reconhecidos:** Firefox, LibreWolf, Zen, Waterfox, Thunderbird,
+Google Chrome, Chromium, Brave, Microsoft Edge, Vivaldi, Opera e aplicativos feitos com
+Electron (VS Code, Discord, Slack, Teams, Claude e outros). No Linux, também as versões
+snap e flatpak.
 
 ## Como usar
 

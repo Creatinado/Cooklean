@@ -1,10 +1,13 @@
 #!/usr/bin/env bash
 # Gera o pacote .deb do Limpa Cookies, para Debian e Ubuntu.
 #
-#   ./gerar_deb.sh      cria dist/limpa-cookies_<versão>_all.deb
+#   ./gerar_deb.sh      cria dist/limpa-cookies.deb
 #
-# Instalar:  sudo apt install ./dist/limpa-cookies_<versão>_all.deb
+# Instalar:  sudo apt install ./dist/limpa-cookies.deb
 # Remover:   sudo apt remove limpa-cookies
+#
+# O nome do arquivo não leva a versão (ela fica dentro do pacote): assim o link
+# releases/latest/download/limpa-cookies.deb do README leva sempre à versão mais nova.
 #
 # O pacote instala para todos os usuários: comando limpa-cookies, atalho no menu e ícone.
 # Com GTK 4 e libadwaita 1.5 ou mais novos (Debian 13, Ubuntu 24.04) abre a janela GTK;
@@ -87,8 +90,8 @@ Description: Lista e elimina os cookies guardados pelos navegadores
 EOF
 
 mkdir -p "$DIR/dist"
-SAIDA="$DIR/dist/${PACOTE}_${VERSAO}_all.deb"
+SAIDA="$DIR/dist/${PACOTE}.deb"
 # xz: lido por qualquer Debian/Ubuntu (o zstd, padrão no Ubuntu, não é lido por dpkg antigos)
 dpkg-deb --root-owner-group -Zxz --build "$RAIZ" "$SAIDA" >/dev/null
-echo "Pacote criado: $SAIDA"
+echo "Pacote criado: $SAIDA (versão $VERSAO)"
 echo "Instalar com:  sudo apt install \"$SAIDA\""

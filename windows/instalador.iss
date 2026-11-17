@@ -17,7 +17,9 @@ DisableProgramGroupPage=yes
 PrivilegesRequired=lowest
 MinVersion=10.0
 OutputDir=..\dist
-OutputBaseFilename=LimpaCookies-{#Versao}-Instalador
+; nome sem a versao: o link releases/latest/download/LimpaCookies-Instalador.exe
+; do README leva sempre ao instalador mais novo
+OutputBaseFilename=LimpaCookies-Instalador
 SetupIconFile=icone.ico
 UninstallDisplayIcon={app}\LimpaCookies.exe
 UninstallDisplayName=Limpa Cookies

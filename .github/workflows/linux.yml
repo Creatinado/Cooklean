@@ -1,0 +1,76 @@
+# Gera o pacote .deb, instala num Ubuntu limpo como um usuário faria e anexa à Release.
+#
+# Roda sozinho sempre que uma Release é publicada. Também dá para disparar à mão, em
+# Actions > Linux > Run workflow, dizendo a qual Release anexar o arquivo.
+#
+# O arquivo vai com nome fixo (limpa-cookies.deb): o link
+# releases/latest/download/limpa-cookies.deb do README leva sempre à versão mais nova.
+name: Linux
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release onde anexar o arquivo (ex.: v1.4.0)"
+        required: true
+
+permissions:
+  contents: write          # para anexar arquivos à Release
+
+jobs:
+  deb:
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ github.event.release.tag_name || inputs.tag }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # o código da própria Release, também quando disparado à mão
+          ref: ${{ github.event.release.tag_name || inputs.tag }}
+
+      - name: Gerar o .deb
+        run: |
+          ./gerar_deb.sh
+          # Releases antigas geravam limpa-cookies_<versão>_all.deb: anexa com o nome fixo
+          deb="$(ls dist/*.deb)"
+          [ "$deb" = dist/limpa-cookies.deb ] || mv "$deb" dist/limpa-cookies.deb
+
+      - name: Conferir a versão
+        run: |
+          versao="$(dpkg-deb --field dist/limpa-cookies.deb Version)"
+          echo "Pacote $versao, Release $TAG"
+          if [ "v$versao" != "$TAG" ]; then
+            echo "::error::APP_VERSION em limpa_cookies.py ($versao) não bate com a Release ($TAG)"
+            exit 1
+          fi
+
+      - name: Instalar como um usuário faria
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y ./dist/limpa-cookies.deb
+
+      - name: Testar o programa instalado
+        env:
+          GSK_RENDERER: cairo   # sem placa de vídeo no GitHub: desenha só com a CPU
+        run: |
+          sudo apt-get install -y -q xvfb dbus desktop-file-utils
+          desktop-file-validate /usr/share/applications/local.LimpaCookies.desktop
+          limpa-cookies --resumo
+
+          # A janela abre e continua aberta? O timeout fecha depois de 15 s e devolve 124;
+          # qualquer outro código quer dizer que o programa fechou sozinho (erro).
+          set +e
+          dbus-run-session -- xvfb-run -a timeout 15 limpa-cookies
+          codigo=$?
+          set -e
+          if [ "$codigo" -ne 124 ]; then
+            echo "::error::a janela do Limpa Cookies não ficou aberta (código $codigo)"
+            exit 1
+          fi
+
+      - name: Anexar à Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$TAG" dist/limpa-cookies.deb --clobber

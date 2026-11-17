@@ -2,8 +2,8 @@
 rem Gera a versao do Limpa Cookies para Windows 10 e 11.
 rem
 rem   dist\LimpaCookies.exe                        programa completo num arquivo so (portatil)
-rem   dist\LimpaCookies-<versao>-Instalador.exe    instalador com atalho no menu Iniciar;
-rem                                                so e criado se houver Inno Setup 6
+rem   dist\LimpaCookies-Instalador.exe    instalador com atalho no menu Iniciar;
+rem                                      so e criado se houver Inno Setup 6
 rem
 rem Precisa, apenas no PC onde se gera (nao nos PCs onde o programa vai rodar):
 rem   - Python 3.9 ou mais novo, de https://www.python.org/downloads/windows/
@@ -44,7 +44,7 @@ echo [3/3] Gerando o instalador...
 echo.
 echo Pronto:
 echo   dist\LimpaCookies.exe
-echo   dist\LimpaCookies-%VERSAO%-Instalador.exe
+echo   dist\LimpaCookies-Instalador.exe (versao %VERSAO%)
 goto :fim
 
 :sem_inno
