@@ -42,7 +42,7 @@ from urllib.parse import urlsplit
 
 APP_ID = "local.LimpaCookies"
 APP_NAME = "Limpa Cookies"
-APP_VERSION = "1.4.0"
+APP_VERSION = "1.5.0"
 WINDOWS = sys.platform == "win32"
 
 COOKIES, PASSWORDS = "cookies", "senhas"       # o que o programa limpa
