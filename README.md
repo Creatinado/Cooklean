@@ -78,8 +78,8 @@ Se o `apt` terminar com uma nota dizendo que o arquivo "não pôde ser acessado 
 </details>
 
 Precisa de Python 3.9 ou mais novo com GTK 4 e libadwaita 1.5 (Debian 13, Ubuntu 24.04).
-Em sistemas mais antigos (Debian 12, Ubuntu 22.04) o programa abre uma janela mais
-simples, que usa o `python3-tk`. O `apt` instala o que faltar.
+Em sistemas mais antigos (Debian 12, Ubuntu 22.04) o programa abre a mesma janela feita
+com o Tk, que usa o `python3-tk`. O `apt` instala o que faltar.
 
 ### Windows 10 e 11
 
@@ -149,7 +149,7 @@ deixa o computador sem senhas salvas e sem sessões abertas a cada vez que algu�
 Cada regra pode ser desligada sem ser apagada, e mostra quando rodou pela última vez.
 
 <p align="center">
-  <img src="docs/limpeza-automatica.png" width="820" alt="Janela de limpeza automática com três regras">
+  <img src="docs/limpeza-automatica.png" width="560" alt="Janela de limpeza automática com três regras">
 </p>
 
 **5. Ajuste.** Na aba **Ajustes**, ligue **Iniciar com o sistema** para o programa abrir
@@ -159,8 +159,8 @@ sozinho a cada início de sessão.
   <img src="docs/ajustes.png" width="820" alt="Aba Ajustes com a opção de iniciar com o sistema">
 </p>
 
-As imagens são da janela do Linux, com dados fictícios. No Windows as telas e funções
-são as mesmas.
+As imagens são da janela do Windows, com dados fictícios. No Linux as telas, as cores e
+as funções são as mesmas.
 
 ## Bom saber
 
@@ -194,5 +194,5 @@ são as mesmas.
 | `limpa_cookies.py` | Abre a janela. |
 | `limpa_cookies.py --resumo` | Imprime só a contagem de cookies e de senhas salvas por aplicativo. |
 | `limpa_cookies.py --minimizado` | Abre a janela minimizada. |
-| `limpa_cookies.py --tk` | No Linux, abre a janela simples (a mesma do Windows). |
+| `limpa_cookies.py --tk` | No Linux, abre a janela Tk (a mesma do Windows). |
 | `limpa_cookies.py --home PASTA` | Usa `PASTA` no lugar da pasta pessoal, para testes. |
